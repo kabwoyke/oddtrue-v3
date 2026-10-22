@@ -2,8 +2,8 @@
 
 Update at the end of every work session. Claude Code reads this at the start of every session.
 
-**Current phase:** 4 — Reconciliation, freeze logic, observability
-**Phase status:** AWAITING APPROVAL (exit criteria met, see session log; Phase 3 approved by owner 2026-10-22)
+**Current phase:** 5 — Real exchange adapters, read-only (5a Binance, 5b Bitget)
+**Phase status:** IN PROGRESS: 5a Binance and 5b Bitget adapters built (read-only); market-data/detection layer still to do
 **Last updated:** 2026-10-22
 **Real-money activity so far:** none
 
@@ -15,8 +15,8 @@ Update at the end of every work session. Claude Code reads this at the start of 
 | 1 | Pure math core | approved | Owner, 2026-10-22 | D-022, D-023; 100% branch coverage |
 | 2 | Exchange interface, fake exchange, ledger | approved | Owner, 2026-10-22 | D-025 Postgres; 99% coverage on exchanges+ledger |
 | 3 | Execution + recovery state machines (fake exchange only) | approved | Owner, 2026-10-22 | D-026, D-027, D-028; ~300 kill points swept; 99% coverage |
-| 4 | Reconciliation, freeze logic, observability | awaiting approval | – | D-029..D-031; 336 tests; 100% on pure math, 99% elsewhere |
-| 5 | Real adapters, read-only (5a Binance, 5b Bitget) | not started | – | No order/borrow endpoints reachable |
+| 4 | Reconciliation, freeze logic, observability | approved | Owner, 2026-10-22 | D-029..D-031; 336 tests; 100% on pure math, 99% elsewhere |
+| 5 | Real adapters, read-only (5a Binance, 5b Bitget) | in progress | – | No order/borrow endpoints reachable |
 | 6 | Testnet, then minimum-size live (6a, 6b) | not started | – | Needs explicit go-ahead for real money |
 | 7 | Paper/shadow trading at scale | not started | – | Several days minimum |
 | 8 | Onboarding, dashboard, billing (8a API keys/onboarding, 8b dashboard API, 8c dashboard UI, 8d M-Pesa) | not started | – | |
@@ -28,6 +28,23 @@ Status values: `not started` · `in progress` · `blocked` · `awaiting approval
 ## Current session log
 
 Newest first. One entry per session.
+
+### 2026-10-22 — Phase 5b (Bitget, read-only)
+- Approval: owner said "continue with phase 5b".
+- Docs: bitget.com/api-doc pages render only in a browser, so the v2 reference was read from the server-rendered catalog pages and recorded in `docs/exchanges/bitget.md` with the method used. Signing came from the legacy doc and the v2 example headers. Public endpoints and the error envelope were confirmed live (a deliberately fake key returned `40037`).
+- Done: `exchanges/bitget/` (`http.py`: GET-only allowlist, signed with key/secret/**passphrase**, envelope handling, per-IP + per-UID budgets and a per-path minimum interval; `adapter.py`: order book with matching-engine timestamps, symbol rules from precisions, fees, spot and cross-margin balances, margin account valued in USDT, borrowable (flag + live max), loans, hourly borrow rate, permissions from `authorities`). Money-moving methods raise the shared `ReadOnlyViolation` (`exchanges/readonly.py`; Binance now uses it too). `scripts/exchange_readonly_smoke.py binance|bitget` replaces the Binance-only script. `verify.sh` and CI cover both exchanges. D-033.
+- Tests: 33 new (tests/test_bitget_readonly.py): signature against an independent HMAC, no secrets in URLs/repr, every write method refused with zero requests, allowlist guard, error envelope on HTTP 200, local ban, per-second limit, USDT valuation and the refusal to guess a price, polling stream. ~99% coverage on the Bitget code. The design flaw found while testing: a "1 call/second" limit cannot be expressed as budget weight (the priority floors forbid it), so it is a per-path interval.
+- Open / limits: **Bitget Classic vs UTA question for the owner (D-033).** Signed endpoints are verified from docs only (no key used); interest accrual timing, auth error codes other than 40037, and the global ban policy are unconfirmed. Websocket depth is not built (REST polling stands in). `maxLimitOrderValue` and the limit-price band are not modelled yet (Phase 6). `margin/currencies` pair flags not used yet.
+- Blocked / needs owner: (1) answer the Classic-vs-UTA question; (2) optionally run `scripts/exchange_readonly_smoke.py bitget` with a READ-ONLY key (withdrawals off) and the Binance one, and send the output; (3) say what comes next: the Phase 5 market-data/detection layer on live data (websocket books, staleness, opportunity detection that only logs) is the remaining Phase 5 work before approval.
+
+### 2026-10-22 — Phase 5a (Binance, read-only)
+- Approval: owner said "continue" after Phase 4 was approved. Phase 5a only; 5b (Bitget) and the opportunity-detection layer are not started.
+- Done: docs read first and recorded with dates in `docs/exchanges/binance.md`. `exchanges/binance/`: signed GET transport with a fixed read-only path allowlist and error normalisation (`http.py`); pure diff-depth book sync with gap detection (`depth.py`); `BinanceReadOnlyAdapter` (order book REST + stream, symbol rules, fees, spot/margin balances, margin account, borrowable, liabilities/loan, hourly borrow rate, permissions); every order/borrow/repay/transfer method raises `ReadOnlyViolation`. `ratelimit/WeightBudget` (priority classes, reserved floors, usage-header sync, ban honoured locally). `scripts/exchange_readonly_smoke.py` for the owner. D-032.
+- Verified live without a key: depth REST (weight 5 matches docs), exchangeInfo filters (BTCUSDT step 0.00001, tick 0.01, min notional 5), the depth stream synced from snapshot and applied updates with no gap, and the adapter returned a book and rules from real Binance. Signed endpoints are verified from docs only: no API key has been used.
+- Tests: 40 new (tests/test_binance_readonly.py): parsing, weight tiers, signature correctness, secrets absent from URLs/repr, every write method refused with zero requests, allowlist guard, error mapping, 429 local ban, budget priorities, depth gap handling, stream. Coverage binance ~99%, ratelimit 100% (gates updated).
+- Open / limits: signed endpoints need a read-only key to confirm (run the smoke script); `marginLevel` 999 handling, margin fee = spot fee, ticker weight and the IP weight limit are assumptions flagged in binance.md; websocket connection caps not yet read; no detection layer yet; margin pair/borrowable universe flags (`allPairs`, `allAssets`) not used yet.
+- Blocked / needs owner: (1) optionally run `BINANCE_API_KEY=... BINANCE_API_SECRET=... .venv/bin/python scripts/exchange_readonly_smoke.py` with a READ-ONLY key (withdrawals off) and tell me the output, or say to go on without it; (2) say "continue" for Phase 5b (Bitget docs, adapter).
+- Next: Phase 5b Bitget, then the market-data/detection layer on live data with no trading.
 
 ### 2026-10-22 — Phase 4
 - Approval: owner said "phase 3 approved, move to phase 4". No open decision blocked this phase (notification channels, #15, are Phase 8, so alerts go through a channel interface).

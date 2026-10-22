@@ -1,17 +1,41 @@
 # Binance — verified API findings
 
-**Status: UNVERIFIED.** Nothing here may be trusted until read from the current official documentation and
-confirmed on testnet or with minimum-size live calls. Record the date and source for every finding.
-Filled during Phase 5a (read-only) and Phase 6 (trading).
+**Status: Phase 5a read-only findings VERIFIED from official docs (2026-10-22); public endpoints and the depth
+stream also confirmed live (no key). Signed endpoints are confirmed from docs only: no API key has been used yet.**
+Trading, borrow, repay and transfer findings are still UNVERIFIED (Phase 6 / 9). Docs base:
+developers.binance.com (spot REST + websocket, margin_trading, wallet).
+
+### Phase 5a verified findings (read 2026-10-22)
+| Topic | Finding |
+|---|---|
+| Credentials | key + secret (HMAC-SHA256 of the query string, `signature` last; `X-MBX-APIKEY` header). No passphrase. |
+| Signed requests | `timestamp` ms + `recvWindow` (default 5000, max 60000). Rejected if timestamp >1 s ahead of server or older than recvWindow, so keep the clock synced (adapter uses 5000). |
+| Order book REST | `GET /api/v3/depth` limit 5/10/20/50/100 = weight 5, 500 = 25, 1000 = 50, 5000 = 250. Returns `lastUpdateId`, string `[price, qty]` pairs. No exchange timestamp: staleness uses local receive time. Weight 5 confirmed live. |
+| Order book stream | `wss://stream.binance.com:9443/ws/<symbol>@depth@100ms`; fields `U`, `u`, `b`, `a`. Sync per Binance rules (drop `u <= lastUpdateId`, first event must straddle, then `U == prev u + 1`). Confirmed live: snapshot + 8 updates applied with no gap. Connection caps (streams per connection, connections per IP) NOT yet read: do before Phase 7. |
+| Symbol rules | `GET /api/v3/exchangeInfo?symbol=` weight 20. `LOT_SIZE` (`minQty`,`maxQty`,`stepSize`), `PRICE_FILTER` (`tickSize`), `NOTIONAL` (`minNotional`; legacy `MIN_NOTIONAL`). **Lot and tick are checked as `x % step == 0`, from zero, not from `minQty`** (Filters page): this resolves the Phase 1 note, `allocation` rounding from zero is right. Status must be `TRADING`. Live BTCUSDT: step 0.00001, tick 0.01, min notional 5. |
+| Fees | `GET /api/v3/account/commission?symbol=` weight 20 (signed): `standardCommission` + `taxCommission`, plus a `discount` (BNB). Adapter ignores the discount (conservative). Margin fee equality with spot is ASSUMED, verify Phase 6. |
+| Spot balances | `GET /api/v3/account?omitZeroBalances=true` weight 20: `balances[].asset/free/locked`. |
+| Cross margin account | `GET /sapi/v1/margin/account` weight 10: `userAssets[].asset/borrowed/free/interest/locked/netAsset`, `marginLevel`, `totalNetAssetOfBtc`, `totalLiabilityOfBtc`, `TotalCollateralValueInUSDT`. Values are in BTC, so USDT figures use `BTCUSDT` from `/api/v3/ticker/price` (weight assumed 4, conservative). `marginLevel` is 999 with no borrow (adapter maps to None, an assumption to confirm on a real account). |
+| Loan and interest | From `userAssets[].borrowed` + `interest` (interest is in the borrowed asset). No separate loan endpoint needed for reads. |
+| Max borrowable | `GET /sapi/v1/margin/maxBorrowable?asset=` weight 50: `amount` (system availability) and `borrowLimit` (account level). Adapter takes the smaller. Cross margin when `isolatedSymbol` is omitted. |
+| Borrow rate | `GET /sapi/v1/margin/next-hourly-interest-rate?assets=&isIsolated=FALSE` weight 100: `nextHourlyInterestRate` per hour. History endpoint is daily. |
+| Permissions | `GET /sapi/v1/account/apiRestrictions` weight 1: `enableReading`, `enableSpotAndMarginTrading`, `enableMargin`, `enableWithdrawals`, `ipRestrict`. There is NO separate borrow flag: `borrow` is reported as `enableMargin`. Real borrow ability must be proven by `maxBorrowable` (spec section 15 step 3). |
+| Rate limits | Per IP, not per key. `X-MBX-USED-WEIGHT-1M` header (confirmed live). 429 = back off (`Retry-After`), 418 = IP ban 2 min to 3 days, 403 = WAF. The IP weight limit value itself (6000/min is the usual spot figure) was NOT read from the docs: configure from `exchangeInfo.rateLimits` in Phase 7. |
+| Errors | `{code (negative int), msg}`. 5xx = outcome UNKNOWN for writes (never retry blind); `-1007` matching-engine timeout. For reads the adapter maps 5xx to `ExchangeDown`. |
+| Margin pair flags | `GET /sapi/v1/margin/allPairs` (`isMarginTrade`, `isBuyAllowed`, `isSellAllowed`, `delistTime`) and `/allAssets` (`isBorrowable`, `userMinBorrow`): documented, not yet used by the adapter (add with the pair universe, decision #6). |
+
+Phase 5a code: `src/oddtrue/exchanges/binance/`. The HTTP layer sends only GETs to a fixed allowlist
+(`READ_ONLY_PATHS`); order, borrow, repay and transfer methods raise `ReadOnlyViolation` before any network code.
+Owner smoke test: `scripts/exchange_readonly_smoke.py` (read-only key).
 
 ## Docs consulted
 | Topic | URL | Date read |
 |---|---|---|
-| Spot REST / WebSocket | | |
-| Margin (cross / isolated) | | |
-| Rate limits | | |
-| Error codes | | |
-| Wallet / withdrawals | | |
+| Spot REST / WebSocket | developers.binance.com/docs/binance-spot-api-docs/rest-api/{market-data-endpoints,general-endpoints,account-endpoints,general-api-information}, /filters, /web-socket-streams | 2026-10-22 |
+| Margin (cross / isolated) | developers.binance.com/docs/margin_trading/{account,borrow-and-repay,market-data} | 2026-10-22 |
+| Rate limits | general-api-information (limit value and websocket caps not read) | 2026-10-22 |
+| Error codes | general-api-information (code format only; full list not read) | 2026-10-22 |
+| Wallet / withdrawals | developers.binance.com/docs/wallet/account/api-key-permission (withdraw endpoints: Phase 9) | 2026-10-22 |
 | Testnet availability | | |
 
 ## Questions to answer (and cite the source)

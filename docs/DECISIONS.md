@@ -105,6 +105,18 @@ session and must **ask** (not guess) about any item still OPEN that blocks the c
 - Decision: Logs are one JSON object per line carrying trade_id, client_id, exchange, leg, state, client_order_id from a context variable; redaction happens in the formatter so it also covers messages, extra fields and tracebacks (secret-looking field names, `name=value` text, bearer tokens, long key-shaped values, and any value registered with `register_secret`). Metrics are an in-process registry with Prometheus text output and low-cardinality labels only (never trade or client ids). Alerts are persisted, de-duplicated for `alert_dedupe_s`, counted, and page-worthy ones go to notification channels; a failing channel or database never breaks trading. The alert for a reserve below `min_reserve_usdt` applies only to exchanges where the client keeps a margin account. Notification channels themselves are Phase 8 (decision #15).
 - Decided by: Claude (design; owner may revise)
 
+### D-032 — Phase 5 read-only guarantee and rate budget
+- Date: 2026-10-22
+- Decision: The real adapters are read-only by construction, not by convention: the HTTP layer has no write method, sends only GETs to a fixed allowlist of paths (a test fails if a path containing order/borrow/repay/withdraw/transfer/loan is added, except the `maxBorrowable` read), and every money-moving `ExchangeAdapter` method raises `ReadOnlyViolation` before any network code. Phase 6 replaces this with a trading adapter deliberately. All requests spend a local weight budget (`ratelimit.WeightBudget`) with priority classes 1-5 and reserved floors, shrink it from the exchange's usage header, and stop sending after a 429/418 until `Retry-After` passes. Reads map 5xx and network failure to `ExchangeDown` (no outcome to be unsure about); writes will keep `UnknownOutcome`.
+- Also: Binance LOT_SIZE/PRICE_FILTER are `x % step == 0` from zero (verified), so Phase 1 rounding stands. Fee discounts (BNB) are ignored for conservatism. Margin account USDT values are derived from BTC figures via BTCUSDT.
+- Decided by: Claude (design; owner may revise)
+
+### D-033 — Bitget read-only adapter conventions
+- Date: 2026-10-22
+- Decision: Same read-only construction as D-032 (GET-only, path allowlist, money-moving methods refuse first); both adapters raise one shared `ReadOnlyViolation`. Spot is the buy side and cross margin the borrow side. Bitget limits are per endpoint and per IP or UID, so the HTTP layer takes a shared per-IP budget, a per-client UID budget and a per-path minimum interval (the account-info call is limited to 1/s). Valuations of margin balances use the USDT ticker and refuse to guess a missing price. Fees use the symbol default (the only readable figure); borrow rate uses the highest (non-VIP) daily rate / 24. Until the Bitget websocket depth channel is read and built, `stream_orderbook` polls the REST book (fine for one client or a test, not for Phase 7 scale).
+- Open for the owner: Bitget documents the "Classic" API as maintenance mode in favour of the Unified Trading Account (UTA) API. The adapter targets Classic v2 because that is what the margin docs we could read describe and what the live endpoints answer. Whether client accounts will be UTA (a different, unified margin model) must be settled before Phase 6.
+- Decided by: Claude (design; owner may revise)
+
 ## Template for new entries
 
 ```
