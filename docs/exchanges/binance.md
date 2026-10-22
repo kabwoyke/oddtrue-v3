@@ -1,7 +1,7 @@
 # Binance — verified API findings
 
 **Status: Phase 5a read-only findings VERIFIED from official docs (2026-10-22); public endpoints and the depth
-stream also confirmed live (no key). Signed endpoints are confirmed from docs only: no API key has been used yet.**
+stream also confirmed live (no key). **Signed read endpoints also confirmed live on 2026-10-22 with an owner-supplied READ-ONLY key (read=True, trade/margin/withdraw all False): `apiRestrictions`, `account/commission`, `account`, `margin/account`, `margin/maxBorrowable` and `next-hourly-interest-rate` all returned and parsed with no error.** Observed: taker/maker fee 0.001 with no tax; borrow rate for BTC 4.8e-7 per hour (about 0.0012% per day); max borrowable scales with collateral (a 0.12 USDT margin wallet allowed 0.00000283 BTC). The spot wallet also lists Simple Earn tokens (`LDUSDT`) and dust coins: see the reconciliation note in PROGRESS. Still unconfirmed live: `marginLevel` 999 with debt present (not read when there is no debt), signature/`recvWindow` clock tolerance under drift.
 Trading, borrow, repay and transfer findings are still UNVERIFIED (Phase 6 / 9). Docs base:
 developers.binance.com (spot REST + websocket, margin_trading, wallet).
 

@@ -30,8 +30,8 @@ jobs:
       - name: 100% branch coverage on pure math (Phase 1 and 4 exit)
         run: >-
           coverage report --fail-under=100
-          --include="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py,src/oddtrue/exchanges/binance/depth.py,src/oddtrue/ratelimit/budget.py"
+          --include="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py,src/oddtrue/exchanges/binance/depth.py,src/oddtrue/ratelimit/budget.py,src/oddtrue/detection/direct.py,src/oddtrue/marketdata/cache.py"
       - name: at least 98% on exchanges, ledger, engine, recovery, reconciliation, safety, observability
         run: >-
           coverage report --fail-under=98
-          --include="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*,src/oddtrue/ratelimit/*"
+          --include="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*,src/oddtrue/ratelimit/*,src/oddtrue/detection/*,src/oddtrue/marketdata/*"

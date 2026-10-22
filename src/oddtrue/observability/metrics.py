@@ -111,6 +111,10 @@ TRADES_FINISHED = "oddtrue_trades_finished_total"  # label: outcome
 TRADES_CANCELLED = "oddtrue_trades_cancelled_total"  # label: reason
 REVALIDATION = "oddtrue_revalidation_total"  # label: result=pass|drop  (drop-off rate = drop / (pass + drop))
 OPPORTUNITIES_FOUND = "oddtrue_opportunities_found_total"  # fed by detection (Phase 5)
+BOOK_UPDATES = "oddtrue_book_updates_total"  # label: exchange
+BOOK_RESYNCS = "oddtrue_book_resyncs_total"  # labels: exchange, reason (the stream dropped and was restarted)
+DETECTION_SCANS = "oddtrue_detection_scans_total"
+DETECTION_REJECTS = "oddtrue_detection_rejects_total"  # label: reason
 LEG_LATENCY = "oddtrue_leg_latency_seconds"  # label: leg
 RECOVERY_COUNT = "oddtrue_recovery_total"
 RECOVERY_COST = "oddtrue_recovery_cost_usdt_total"

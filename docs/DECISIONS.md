@@ -117,6 +117,12 @@ session and must **ask** (not guess) about any item still OPEN that blocks the c
 - Open for the owner: Bitget documents the "Classic" API as maintenance mode in favour of the Unified Trading Account (UTA) API. The adapter targets Classic v2 because that is what the margin docs we could read describe and what the live endpoints answer. Whether client accounts will be UTA (a different, unified margin model) must be settled before Phase 6.
 - Decided by: Claude (design; owner may revise)
 
+### D-034 — Market-data layer and log-only detection (Phase 5)
+- Date: 2026-10-22
+- Decision: (1) One shared `BookCache` per exchange+symbol, served only while fresh (age against the book's own timestamp, `max_book_age_s`), never replaced by an older book, and invalidated the moment its feed errors. (2) `BookFeed` keeps it filled: one task per symbol; any failure (including an unexpected exception, which is logged with a traceback and counted as reason `unexpected`) invalidates the book, backs off (rate-limit `retry_after` honoured, else exponential up to a cap, reset by a healthy update) and restarts the stream, which starts with a fresh snapshot. The feed sees only `name` and `stream_orderbook` of an adapter (a `BookSource` protocol), not its trading or account methods. (3) Direct detection is a pure function using the same cost model as the engine's revalidation (VWAP, taker fees both legs, interest per started hour, ROI on the buy notional), sized to the 90% market cap and floored to the step common to both exchanges. It is market-level: it ignores client balances and borrow limits, so it only says "worth considering"; `validate_trade` remains the single judge. (4) The scanner records opportunity open/close transitions with lifetimes (the data Phase 7 needs for batch sizing) and rejection reasons. (5) Fees and borrow rates are signed reads on Binance, so without keys they must be passed explicitly and every opportunity is logged with `assumed` listing them; nothing is guessed silently. (6) Tests enforce that `detection/` and `marketdata/` import nothing from execution/recovery/ledger/safety/reconciliation and never reference a trading method.
+- Found by running it live: the Binance websocket connector let a raw `socket.gaierror` escape and the feed died silently, leaving every book stale (correctly ignored, but invisible). Fixed at both levels: the connector maps transport errors to `ExchangeDown`/`StreamDropped`, and the feed no longer dies on anything.
+- Decided by: Claude (design; owner may revise)
+
 ## Template for new entries
 
 ```

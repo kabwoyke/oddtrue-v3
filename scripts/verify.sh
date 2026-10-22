@@ -157,10 +157,10 @@ run "strict type-check (mypy)" "$PY" -m mypy
 run "secret scan (tracked + new files)" "$PY" scripts/scan_secrets.py $( (git ls-files; git ls-files -o --exclude-standard) | grep -v '^\.venv/' | sort -u)
 
 # ---- 4. tests (+ coverage collected in the same run) ----------------------------------------
-PURE="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py,src/oddtrue/exchanges/binance/depth.py,src/oddtrue/ratelimit/budget.py"
-REST="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*,src/oddtrue/ratelimit/*"
+PURE="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py,src/oddtrue/exchanges/binance/depth.py,src/oddtrue/ratelimit/budget.py,src/oddtrue/detection/direct.py,src/oddtrue/marketdata/cache.py"
+REST="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*,src/oddtrue/ratelimit/*,src/oddtrue/detection/*,src/oddtrue/marketdata/*"
 # Phase 5 exit criterion: no order/borrow/repay/withdraw endpoint is reachable from the real-exchange code. Needs no database.
-run "Binance and Bitget adapters are read-only (guard + adapter tests)" "$PY" -m pytest -q tests/test_binance_readonly.py tests/test_bitget_readonly.py -p no:cacheprovider
+run "Phase 5: adapters read-only, detection/market data cannot reach trading" "$PY" -m pytest -q tests/test_binance_readonly.py tests/test_bitget_readonly.py tests/test_marketdata_scanner.py tests/test_factory.py -p no:cacheprovider
 run "no write verbs in real-exchange code" bash -c '! grep -rnEi "\.(post|put|delete|patch)\(|method *= *.?(POST|PUT|DELETE)" src/oddtrue/exchanges/binance src/oddtrue/exchanges/bitget --include=*.py'
 if [ "$LIVE_PUBLIC" = 1 ]; then
   run "live public Binance read (no keys): book + symbol rules" bash -c "env -u BINANCE_API_KEY -u BINANCE_API_SECRET '$PY' scripts/exchange_readonly_smoke.py binance | grep -q '^rules:'"
