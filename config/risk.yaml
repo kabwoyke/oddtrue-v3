@@ -1,0 +1,22 @@
+# Risk configuration. All numbers are decimals written as STRINGS (floats are rejected by the loader).
+# Values marked PROVISIONAL are placeholders for open decision #12 and must be tuned in Phases 6-7.
+
+mode: "paper"            # paper | testnet | live-min | live
+live_enabled: false      # one of three gates for live (env var + this flag + allowlist)
+live_allowlist: []       # client ids permitted in live / live-min
+
+client_trade_pct: "0.95"       # active execution allocation: U x 0.95
+client_reserve_pct: "0.05"     # reserve: U x 0.05, not auto-spent
+market_liquidity_pct: "0.90"   # max share of executable liquidity consumed per opportunity (all clients)
+
+max_slippage: "0.002"          # PROVISIONAL: 0.2% from best price
+min_net_roi: "0.30"            # PROVISIONAL: percent, after all costs and final revalidation
+live_min_max_notional_usdt: "10"
+
+op_timeout_s: 10               # PROVISIONAL: per-operation hard limit (spec 37)
+recovery_timeout_s: 120        # PROVISIONAL
+
+max_exposure_per_client_usdt: "1000"    # PROVISIONAL
+max_exposure_global_usdt: "50000"       # PROVISIONAL
+settlement_method: "buy_on_borrow_side"  # buy_on_borrow_side | preheld_inventory | transfer_to_borrow_side (D-020)
+margin_mode: "cross"                     # provisional, verify in Phase 5 (D-021)

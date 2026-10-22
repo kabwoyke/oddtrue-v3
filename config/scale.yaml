@@ -1,0 +1,11 @@
+# Scale configuration (CLAUDE.md 4A). Design/test target: 300 clients. Launch cap: 50 (ramp 5 -> 20 -> 50 -> 100 -> 200).
+max_active_clients: 5
+max_concurrent_trades_global: 50       # PROVISIONAL
+max_concurrent_trades_per_client: 1
+batch_size: 20                         # PROVISIONAL
+batch_stagger_ms: 100                  # PROVISIONAL
+queue_max_depth: 1000                  # PROVISIONAL
+client_op_timeout_s: 15                # PROVISIONAL
+
+# Per-exchange request budgets: unknown until verified in Phase 5 (docs/exchanges/*.md). Do not guess.
+exchange_budgets: {}

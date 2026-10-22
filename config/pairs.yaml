@@ -1,0 +1,3 @@
+# Pair allow/deny lists. Empty allowlist = nothing tradable (decision #6 is still open; no pairs enabled by default).
+allow: []
+deny: []
