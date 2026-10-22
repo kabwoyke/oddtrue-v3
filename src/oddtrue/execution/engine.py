@@ -34,7 +34,9 @@ from oddtrue.execution.plan import TradePlan
 from oddtrue.execution.states import TERMINAL, TradeState, is_legal
 from oddtrue.execution.steps import Hold, Move, Step
 from oddtrue.ledger.models import LegStatus, Outcome
-from oddtrue.ledger.repository import ConcurrencyLimit, StateConflict
+from oddtrue.ledger.repository import ConcurrencyLimit, StateConflict, TradeBlocked
+from oddtrue.observability import metrics as m
+from oddtrue.observability.logging import get_logger, log_context
 from oddtrue.pricing import (
     InsufficientDepth,
     executable_liquidity,
@@ -46,9 +48,11 @@ from oddtrue.pricing import (
     walk_book,
 )
 from oddtrue.pricing.types import ZERO, Side
+from oddtrue.reconciliation.reconciler import Verdict
 from oddtrue.recovery.exposure import compute_exposure
 from oddtrue.recovery.recovery import recovery_handler, settling_handler
 
+log = get_logger("engine")
 BOOK_DEPTH = 50
 _NO_MONEY_AT_RISK = frozenset(
     {TradeState.ALLOCATED, TradeState.PRECHECK_B_LIQUIDITY, TradeState.PRECHECK_BORROW, TradeState.REVALIDATED}
@@ -68,7 +72,9 @@ class RunResult:
 
 
 class StartRefused(Exception):
-    pass
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 Handler = Callable[[TradeCtx], Awaitable[Step]]
@@ -92,12 +98,18 @@ class TradeEngine:
     # ---- public API ----------------------------------------
     async def start(self, plan: TradePlan) -> RunResult:
         """Persist the allocated trade (refusing if the client already has one running), then drive it."""
+        refused = await self._d.gate.blocked_reason(plan.client_id, (plan.buy_exchange, plan.borrow_exchange))
+        if refused is not None:
+            raise StartRefused(f"gate:{refused}")
         try:
             await self._d.ledger.create_trade_limited(
                 plan.new_trade_row(), plan.to_json(), self._d.max_unfinished_per_client, at=_at(self._d)
             )
         except ConcurrencyLimit as exc:
             raise StartRefused(str(exc)) from exc
+        except TradeBlocked as exc:
+            raise StartRefused(exc.reason) from exc
+        self._d.metrics.inc(m.TRADES_STARTED)
         self._d.checkpoint("created")
         return await self.advance(plan.client_id, plan.trade_id)
 
@@ -106,6 +118,13 @@ class TradeEngine:
         return [await self.advance(t.client_id, t.id) for t in await self._d.ledger.unfinished_trades()]
 
     async def advance(self, client_id: str, trade_id: str) -> RunResult:
+        with log_context(client_id=client_id, trade_id=trade_id):
+            try:
+                return await self._advance(client_id, trade_id)
+            finally:
+                await self._d.alerts.flush()  # persist and page whatever was raised, even when the trade is parked
+
+    async def _advance(self, client_id: str, trade_id: str) -> RunResult:
         led = self._d.ledger
         plan = TradePlan.from_json(await led.get_plan(client_id, trade_id))
         ctx = TradeCtx(self._d, plan, Gateway(self._d))
@@ -115,45 +134,67 @@ class TradeEngine:
             if state in TERMINAL:
                 outcome = row.outcome or await self._finish(ctx, state)
                 return RunResult(state, outcome, None)
-            try:
-                step = await self._handlers[state](ctx)
-            except Unresolved as exc:
-                return RunResult(state, None, f"unresolved:{exc.what}")
-            except AuthError as exc:
-                ctx.alert(AlertKind.AUTH_INCIDENT, str(exc))
-                if state not in _NO_MONEY_AT_RISK:
-                    return RunResult(state, None, "auth_error")
-                step = Move(TradeState.CANCELLED, "auth_error")  # nothing sent yet: stop, do not park the client
-            except (ExchangeDown, RateLimited, UnknownOutcome) as exc:
-                ctx.alert(AlertKind.EXCHANGE_DOWN_IN_FLIGHT, f"{state.value}: {type(exc).__name__}")
-                return RunResult(state, None, f"exchange_unavailable:{type(exc).__name__}")
-            except ExchangeError as exc:  # anything else the adapters normalise: park the trade, never crash it
-                ctx.alert(
-                    AlertKind.UNKNOWN_OUTCOME_UNRESOLVED, f"{state.value}: unexpected {type(exc).__name__}: {exc}"
-                )
-                return RunResult(state, None, f"exchange_error:{type(exc).__name__}")
-            if isinstance(step, Hold):
-                return RunResult(state, None, step.reason)
-            if not is_legal(state, step.to):
-                raise RuntimeError(f"illegal transition {state} -> {step.to}")
-            if step.to is TradeState.CANCELLED:
-                ctx.plan = ctx.plan.with_(outcome=Outcome.CANCELLED.value)
-                await led.set_plan(client_id, trade_id, ctx.plan.to_json())
-            try:
-                await led.transition(client_id, trade_id, state.value, step.to.value, step.reason, at=ctx.now())
-            except StateConflict:
-                continue  # another worker moved it; reload and decide again
-            ctx.cp(f"state:{step.to.value}")
+            with log_context(state=state.value):
+                try:
+                    step = await self._handlers[state](ctx)
+                except Unresolved as exc:
+                    log.warning("trade parked: unresolved %s", exc.what)
+                    return RunResult(state, None, f"unresolved:{exc.what}")
+                except AuthError as exc:
+                    ctx.alert(AlertKind.AUTH_INCIDENT, str(exc))
+                    if state not in _NO_MONEY_AT_RISK:
+                        return RunResult(state, None, "auth_error")
+                    step = Move(TradeState.CANCELLED, "auth_error")  # nothing sent yet: stop, do not park the client
+                except (ExchangeDown, RateLimited, UnknownOutcome) as exc:
+                    ctx.alert(AlertKind.EXCHANGE_DOWN_IN_FLIGHT, f"{state.value}: {type(exc).__name__}")
+                    return RunResult(state, None, f"exchange_unavailable:{type(exc).__name__}")
+                except ExchangeError as exc:  # anything else the adapters normalise: park the trade, never crash it
+                    ctx.alert(
+                        AlertKind.UNKNOWN_OUTCOME_UNRESOLVED, f"{state.value}: unexpected {type(exc).__name__}: {exc}"
+                    )
+                    return RunResult(state, None, f"exchange_error:{type(exc).__name__}")
+                if isinstance(step, Hold):
+                    log.info("trade held: %s", step.reason)
+                    return RunResult(state, None, step.reason)
+                if not is_legal(state, step.to):
+                    raise RuntimeError(f"illegal transition {state} -> {step.to}")
+                if step.to is TradeState.CANCELLED:
+                    ctx.plan = ctx.plan.with_(outcome=Outcome.CANCELLED.value)
+                    await led.set_plan(client_id, trade_id, ctx.plan.to_json())
+                    self._d.metrics.inc(m.TRADES_CANCELLED, reason=step.reason.split(":", 1)[0])
+                try:
+                    await led.transition(client_id, trade_id, state.value, step.to.value, step.reason, at=ctx.now())
+                except StateConflict:
+                    continue  # another worker moved it; reload and decide again
+                if step.to is TradeState.RECOVERY and state is not TradeState.RECOVERY:
+                    self._d.metrics.inc(m.RECOVERY_COUNT)
+                log.info("%s -> %s: %s", state.value, step.to.value, step.reason)
+                ctx.cp(f"state:{step.to.value}")
 
     async def _finish(self, ctx: TradeCtx, state: TradeState) -> Outcome:
         plan = TradePlan.from_json(await ctx.deps.ledger.get_plan(ctx.plan.client_id, ctx.plan.trade_id))
         outcome = Outcome(plan.outcome or (Outcome.CANCELLED.value if state is TradeState.CANCELLED else "FAILED"))
         await ctx.deps.ledger.finish_trade(ctx.plan.client_id, ctx.plan.trade_id, outcome, at=ctx.now())
+        ctx.deps.metrics.inc(m.TRADES_FINISHED, outcome=outcome.value)
+        if outcome is Outcome.RECOVERED:
+            net = (await ctx.deps.ledger.trade_result(ctx.plan.client_id, ctx.plan.trade_id)).net
+            ctx.deps.metrics.inc(m.RECOVERY_COST, max(-net, ZERO))  # the real cost of the failure, from actual fills
+        log.info("trade finished: %s", outcome.value)
         ctx.cp("finished")
         return outcome
 
     # ---- pre-checks (no money at risk: any failure cancels) ----------------------------------------
     async def _allocated(self, ctx: TradeCtx) -> Step:
+        """Before risking money, confirm the exchanges still match what the ledger expects (rule 7)."""
+        rec = ctx.deps.reconciler
+        if rec is not None:
+            verdict = await rec.reconcile(
+                ctx.plan.client_id, ctx.deps.venues, trigger="pre_trade", trade_id=ctx.plan.trade_id
+            )
+            if verdict.verdict is Verdict.MISMATCH:
+                return Move(TradeState.CANCELLED, "client_frozen:balance_mismatch")
+            if not verdict.ok:
+                return Move(TradeState.CANCELLED, f"reconcile_{verdict.verdict.value.lower()}:{verdict.detail}")
         return Move(TradeState.PRECHECK_B_LIQUIDITY, "allocated")
 
     def _fresh(self, ctx: TradeCtx, ts: float) -> bool:
@@ -194,7 +235,7 @@ class TradeEngine:
     async def _revalidate(self, ctx: TradeCtx) -> Step:
         """Final check from fresh data immediately before sending anything. validate_trade() is the single judge."""
         p, risk = ctx.plan, ctx.deps.risk
-        blocked = await ctx.deps.gate.blocked_reason(p.client_id)
+        blocked = await ctx.deps.gate.blocked_reason(p.client_id, (p.buy_exchange, p.borrow_exchange))
         if blocked is not None:
             return Move(TradeState.CANCELLED, f"gate:{blocked}")
         try:
@@ -210,11 +251,13 @@ class TradeEngine:
         except Unresolved as exc:
             return Move(TradeState.CANCELLED, f"revalidation_read_failed:{exc.what}")
         if not (self._fresh(ctx, book_a.ts) and self._fresh(ctx, book_b.ts)):
+            ctx.deps.metrics.inc(m.REVALIDATION, result="drop")
             return Move(TradeState.CANCELLED, "book_stale_at_revalidation")
         try:
             buy = walk_book(book_a.asks, p.qty, Side.BUY)
             sell = walk_book(book_b.bids, p.qty, Side.SELL)
         except InsufficientDepth as exc:
+            ctx.deps.metrics.inc(m.REVALIDATION, result="drop")
             return Move(TradeState.CANCELLED, f"insufficient_depth:{exc}")
 
         hours = Decimal(max(1, math.ceil(Decimal(risk.expected_loan_seconds) / _SECONDS_PER_HOUR)))  # billed per hour
@@ -252,7 +295,9 @@ class TradeEngine:
         )
         if not verdict.passed:
             why = ",".join(f"{f.check.value}[{f.side}]" for f in verdict.failures)
+            ctx.deps.metrics.inc(m.REVALIDATION, result="drop")
             return Move(TradeState.CANCELLED, f"validate_trade_failed:{why}")
+        ctx.deps.metrics.inc(m.REVALIDATION, result="pass")
         ctx.plan = p.with_(
             buy_vwap=buy.vwap, sell_vwap=sell.vwap, buy_limit=buy_limit, sell_limit=sell_limit, expected_net_roi_pct=roi
         )
@@ -271,7 +316,7 @@ class TradeEngine:
         resumed = bool(existing) or bool(await led.loans(p.client_id, p.trade_id))
         if not await led.loans(p.client_id, p.trade_id):
             before = await ctx.gw.read("get_loan", lambda: ctx.b.get_loan(ctx.coin))
-            await led.open_loan(p.client_id, p.trade_id, p.borrow_exchange, ctx.coin, before.principal)
+            await led.open_loan(p.client_id, p.trade_id, p.borrow_exchange, ctx.coin, before.principal, at=ctx.now())
             ctx.cp("loan_opened")
 
         async def leg_a() -> None:
@@ -343,10 +388,10 @@ class TradeEngine:
             adapter = ctx.a if on_a else ctx.b
             seen = await _query_order(ctx, adapter, leg.client_order_id, account)
             if seen.filled_qty != (leg.filled_qty or ZERO):
-                ctx.alert(
-                    AlertKind.RECONCILIATION_MISMATCH,
-                    f"{leg.leg}: ledger {leg.filled_qty} vs exchange {seen.filled_qty}",
-                )
+                detail = f"{leg.leg}: ledger {leg.filled_qty} vs exchange {seen.filled_qty}"
+                ctx.alert(AlertKind.RECONCILIATION_MISMATCH, detail)
+                if ctx.deps.reconciler is not None:
+                    await ctx.deps.reconciler.freeze_client(p.client_id, f"leg_mismatch: {detail}", p.trade_id)
                 return Hold("reconciliation_mismatch")
         rows = await led.loans(p.client_id, p.trade_id)
         if rows:
@@ -356,6 +401,13 @@ class TradeEngine:
             for row in rows:
                 await led.verify_loan_zero(p.client_id, row.id, at=ctx.now())
         await led.trade_result(p.client_id, p.trade_id)  # derivable from entries alone
+        rec = ctx.deps.reconciler
+        if rec is not None:
+            outcome = await rec.reconcile(p.client_id, ctx.deps.venues, trigger="post_trade", trade_id=p.trade_id)
+            if outcome.verdict is Verdict.MISMATCH:
+                return Hold("balance_mismatch")  # the client is frozen; the trade is not DONE until a human resolves it
+            if outcome.verdict is Verdict.UNAVAILABLE:
+                return Hold("reconcile_unavailable")
         return Move(TradeState.REBALANCE_EVAL, "reconciled")
 
     async def _rebalance_eval(self, ctx: TradeCtx) -> Step:

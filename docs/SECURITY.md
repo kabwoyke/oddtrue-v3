@@ -60,3 +60,11 @@ incident, not just a data incident.
 | Exchange outage during an open loan | Recovery state machine, timeouts, alerts, runbook, manual intervention path |
 | Runaway bug trades repeatedly | Exposure limits, kill switches, per-client freeze, circuit breakers on loss/error rate |
 | Cross-client data mix-up | Row-level security, client_id on all rows, isolation tests, no shared mutable state in the engine |
+
+## Logging and redaction (Phase 4)
+- Logs are JSON; redaction is applied in the formatter, so it covers messages, structured fields and formatted tracebacks.
+  Secret-looking field names (api key, secret, passphrase, password, token, authorization, signature, X-MBX-APIKEY,
+  OK-ACCESS-*, private key, otp, mfa, dek) lose their value; `name=value` text, bearer tokens and long key-shaped values are
+  scrubbed; any decrypted credential held in memory must be passed to `register_secret` so it is masked wherever it appears.
+- Alert text is redacted before it is stored or paged. Metrics labels never contain trade or client identifiers.
+- Tests (`tests/test_observability.py`) prove a secret carried in an exchange error never reaches a log line.

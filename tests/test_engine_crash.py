@@ -159,3 +159,53 @@ async def test_crash_at_every_checkpoint_then_resume(scenario: str, ledger: Ledg
     assert outcomes  # and the sweep really exercised more than one ending where the scenario allows
     if scenario == "success":
         assert Outcome.SUCCESS in outcomes
+
+
+@pytest.mark.parametrize("scenario", ["success", "sell_rejected", "naked_short", "partial_buy"])
+async def test_crash_at_every_checkpoint_never_leaves_a_client_falsely_frozen(scenario: str, ledger: Ledger) -> None:
+    """With the full safety stack on (balance reconciliation before and after every trade), a crash at any step and a
+    resume must end with the trade finished, the books matching the exchanges, and NO freeze: the ledger's expectation
+    (last known-good snapshot + settled legs) has to hold however the trade was interrupted."""
+    from tests.world import build_safe
+
+    setup = SCENARIOS[scenario]
+    names = await _checkpoints(ledger, setup)
+    for k in range(1, len(names) + 1):
+        trade_id = f"{scenario}-safe-{k}"
+        # every iteration is a brand-new world, so it must not inherit the previous iteration's snapshots
+        await ledger.connection.execute("DELETE FROM client_freezes")
+        await ledger.connection.execute("DELETE FROM reconciliations")
+        doomed = await db.connect(TEST_DSN)
+        world = build_world(Ledger(doomed))
+        setup(world)
+        counter = 0
+
+        def kill_here(name: str, k: int = k) -> None:
+            nonlocal counter
+            counter += 1
+            if counter == k:
+                raise SimulatedCrash(name)
+
+        try:
+            await build_safe(world).engine(checkpoint=kill_here).start(world.plan(trade_id))
+        except (SimulatedCrash, BaseExceptionGroup):
+            pass
+        await doomed.close()
+
+        survivor = await db.connect(TEST_DSN)
+        try:
+            world.ledger = Ledger(survivor)
+            safe = build_safe(world)
+            results = await safe.engine().resume_all()
+            row = await world.ledger.get_trade("john", trade_id)
+            final = results[0] if results else RunResult(TradeState(row.state), row.outcome, None)
+            where = f"crash after checkpoint #{k} {names[k - 1]!r}"
+            assert await safe.safety.frozen_clients() == [], f"{where}: client falsely frozen"
+            assert "reconciliation_mismatch" not in safe.kinds(), f"{where}: false mismatch alert"
+            await _assert_safe(world, world.ledger, trade_id, final)
+            recons = await safe.safety.reconciliations("john")
+            assert recons and recons[-1].status.value in ("OK", "BASELINE"), where
+        except AssertionError as exc:
+            raise AssertionError(f"{scenario}: {exc}") from exc
+        finally:
+            await survivor.close()

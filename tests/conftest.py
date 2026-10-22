@@ -12,7 +12,7 @@ from oddtrue.ledger import db
 from oddtrue.ledger.repository import Ledger
 
 if TYPE_CHECKING:
-    from tests.world import World
+    from tests.world import Safe, World
 
 # Throwaway local Postgres from docker-compose.yml (`docker compose up -d --wait`). CI sets the variable.
 TEST_DSN = os.environ.get("ODDTRUE_TEST_DATABASE_URL", "postgresql://oddtrue:oddtrue_dev@127.0.0.1:55432/oddtrue")
@@ -46,3 +46,10 @@ async def world(ledger: Ledger) -> World:
     from tests.world import build_world
 
     return build_world(ledger)
+
+
+@pytest.fixture
+async def safe(world: World) -> Safe:
+    from tests.world import build_safe
+
+    return build_safe(world)

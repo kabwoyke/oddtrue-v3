@@ -10,12 +10,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
-from typing import TypeVar
+from typing import Protocol, TypeVar
 
+from oddtrue.config.models import RiskConfig
 from oddtrue.exchanges.base import ORDER_NOT_FOUND, ExchangeAdapter
 from oddtrue.exchanges.errors import ExchangeDown, RateLimited, Rejected, UnknownOutcome
 from oddtrue.exchanges.models import AccountType, OrderResult
-from oddtrue.execution.deps import EngineDeps
+from oddtrue.execution.deps import Clock
 
 T = TypeVar("T")
 
@@ -28,8 +29,21 @@ class Unresolved(Exception):
         self.what = what
 
 
+class GatewayEnv(Protocol):
+    """What the gateway needs from its owner: limits, a clock and an optional (test) timeout override."""
+
+    @property
+    def risk(self) -> RiskConfig: ...
+
+    @property
+    def clock(self) -> Clock: ...
+
+    @property
+    def op_timeout_override_s(self) -> float | None: ...
+
+
 class Gateway:
-    def __init__(self, deps: EngineDeps) -> None:
+    def __init__(self, deps: GatewayEnv) -> None:
         self._d = deps
         override = deps.op_timeout_override_s
         self._timeout_s = override if override is not None else float(deps.risk.op_timeout_s)

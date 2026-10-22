@@ -23,12 +23,15 @@ jobs:
         run: python scripts/scan_secrets.py $(git ls-files)
       - run: ruff check .
       - run: mypy
-      - run: pytest
+      - name: tests, with coverage collected in the same run
+        run: pytest -q --cov=oddtrue --cov-branch
         env:
-          CI: "true"  # DB tests must run in CI, never skip
-      - name: 100% branch coverage on pure math (CLAUDE.md phase 1 exit)
-        run: pytest -q --cov=oddtrue.pricing --cov=oddtrue.allocation --cov-branch --cov-fail-under=100
-      - name: coverage on exchanges, ledger, execution, recovery (Phase 2-3 exit)
-        run: pytest -q --cov=oddtrue.exchanges --cov=oddtrue.ledger --cov=oddtrue.execution --cov=oddtrue.recovery --cov-branch --cov-fail-under=98
-        env:
-          CI: "true"
+          CI: "true"  # database tests must run in CI, never skip
+      - name: 100% branch coverage on pure math (Phase 1 and 4 exit)
+        run: >-
+          coverage report --fail-under=100
+          --include="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py"
+      - name: at least 98% on exchanges, ledger, engine, recovery, reconciliation, safety, observability
+        run: >-
+          coverage report --fail-under=98
+          --include="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*"

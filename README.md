@@ -47,7 +47,7 @@ Commands below are for Linux (written for Linux Mint 22 / Ubuntu 24.04) and run 
 ### One command: verify everything
 
 ```bash
-scripts/verify.sh            # full run, about 4 minutes
+scripts/verify.sh            # full run, about 4 minutes (the sweeps kill the engine at ~600 points and resume it)
 scripts/verify.sh --quick    # skips the crash-and-resume sweep and coverage gates, about 30 seconds
 scripts/verify.sh --keep-db  # leave Postgres running afterwards
 ```
@@ -87,7 +87,7 @@ Check it is healthy: `docker compose ps` should show `healthy`.
 .venv/bin/python -m pytest -q
 ```
 
-Expect all tests to pass (235 at the end of Phase 3; the crash-and-resume sweep takes about 45 seconds). If Postgres is not running, the database tests are **skipped**
+Expect all tests to pass (336 at the end of Phase 4; the crash-and-resume sweeps take about two minutes). If Postgres is not running, the database tests are **skipped**
 (shown as `s` in the output); start it with Step 2 and rerun. In CI they must run and never skip.
 
 Useful variations:

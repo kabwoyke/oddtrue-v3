@@ -3,7 +3,9 @@
 Operational procedures. Must be written and rehearsed (tabletop, then in testnet/live-min) **before Phase 10**.
 Each runbook: trigger → immediate actions → verification → follow-up. Keep steps short and unambiguous.
 
-> Status: TEMPLATES. Fill in concrete commands, dashboards and contacts as the system is built.
+> Status: TEMPLATES, with the Phase 4 mechanics filled in (halts, freezes, alerts). The operator-only admin API and
+> console arrive in Phase 8; until then operators use the Python API shown below from an authenticated shell. Contacts,
+> dashboards and on-call rota are still to be filled in.
 
 ## General rules
 - Safety first: stop *new* trades, then resolve open positions. Never abandon an open loan.
@@ -29,11 +31,32 @@ per client); nothing is retried blindly. `advance(client, trade)` safely resumes
 | `loan_present_before_trade` | cancelled | A loan for the coin already existed | RB-5 (unexplained borrow) |
 | `dust_left` (not a page) | continues | Coin below the exchange minimum order left on A | none; sweep during rebalancing |
 
+## Operator commands (Phase 4, from an authenticated Python shell)
+```python
+halts = HaltController(ledger, clock, alerts, metrics)  # oddtrue.safety.halts
+await halts.halt_global("reason", "ops:alice")  # stop NEW trades everywhere
+await halts.halt_exchange("bitget", "reason", "ops:alice")  # stop new trades touching one exchange
+await halts.halt_client("john", "reason", "ops:alice")  # pause one client
+await halts.resume_global("reason", "ops:alice")  # likewise resume_exchange / resume_client
+await halts.active()  # what is halted now
+safety = SafetyLedger(ledger)  # oddtrue.ledger.safety
+await safety.frozen_clients()
+await safety.active_freeze("john")  # who is frozen and why
+await safety.audit_entries(client_id="john")  # the append-only audit trail
+await reconciler.recheck("john", venues, "ops:alice")  # lifts a freeze only if the books now match
+await reconciler.accept_exchange_state("john", venues, "ops:alice", "client deposited 50 USDT by hand")
+await engine.advance("john", "<trade_id>")  # resume one parked trade
+await supervisor.sweep()  # resume all parked trades + reconcile idle clients
+```
+Every halt, resume, freeze and unfreeze is audit-logged with actor and reason; reasons are mandatory.
+
 ## RB-1 Global halt / exchange halt / client pause
 - Trigger: runaway behaviour, exchange incident, security concern, owner decision.
 - Actions: set halt (scope GLOBAL / EXCHANGE / CLIENT) → confirm no new trades start → list in-flight trades.
 - Verify: in-flight trades complete or recover; open loans reach 0; no open orders.
 - Resume: fresh readiness checks (API, balances, margin, borrow, inventory, transfers) before rejoining rotation.
+- A halt never stops in-flight trades or their recovery; do not try to "force" one by editing rows. An exchange that fails
+  repeatedly is halted automatically (actor `system:health`); lifting that halt is a human decision.
 
 ## RB-2 Stuck loan (loan not zero after recovery timeout)
 - Trigger: alert "loan not zero after recovery timeout".
@@ -57,6 +80,9 @@ per client); nothing is retried blindly. `advance(client, trade)` safely resumes
 - Actions: client auto-frozen (RECONCILING) → capture both snapshots → classify (missed fill, duplicate,
   manual client action on exchange, fee/interest rounding, bug) → fix via compensating entries → unfreeze.
 - Escalate if unexplained; do not unfreeze on guesses.
+- Look at the stored reconciliation first: `safety.reconciliations(client)[-1]` holds `expected`, `actual` and `diff`.
+  A positive delta means the exchange holds MORE than the ledger accounts for. Resolve with `recheck` (books match again)
+  or `accept_exchange_state` with a note (e.g. a deposit the client made). A parked trade then finishes via `engine.advance`.
 
 ## RB-6 API key compromise or revocation
 - Trigger: client reports compromise; unexpected permission change; auth errors.

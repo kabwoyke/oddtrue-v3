@@ -135,7 +135,7 @@ async def main() -> None:
     await conn.execute("DROP SCHEMA public CASCADE")
     await conn.execute("CREATE SCHEMA public")
     applied = await db.migrate(conn)
-    assert applied == [1, 2], applied
+    assert applied == [1, 2, 3], applied
     assert await db.migrate(conn) == []  # idempotent
     await conn.close()
 
@@ -153,23 +153,22 @@ run "strict type-check (mypy)" "$PY" -m mypy
 # shellcheck disable=SC2046
 run "secret scan (tracked + new files)" "$PY" scripts/scan_secrets.py $( (git ls-files; git ls-files -o --exclude-standard) | grep -v '^\.venv/' | sort -u)
 
-# ---- 4. tests ----------------------------------------
+# ---- 4. tests (+ coverage collected in the same run) ----------------------------------------
+PURE="src/oddtrue/pricing/*,src/oddtrue/allocation/*,src/oddtrue/reconciliation/diff.py,src/oddtrue/reconciliation/expected.py,src/oddtrue/reconciliation/snapshot.py"
+REST="src/oddtrue/exchanges/*,src/oddtrue/ledger/*,src/oddtrue/execution/*,src/oddtrue/recovery/*,src/oddtrue/reconciliation/*,src/oddtrue/safety/*,src/oddtrue/observability/*"
 if [ "$DB_OK" = 1 ]; then
   export CI=true # database tests must run, never silently skip
+  rm -f .coverage
   if [ "$QUICK" = 1 ]; then
-    run "test suite (without the crash sweep)" "$PY" -m pytest -q --ignore=tests/test_engine_crash.py
-    skip "crash-and-resume sweep (~300 kill points)" "--quick"
+    run "test suite (without the crash sweeps)" "$PY" -m pytest -q --ignore=tests/test_engine_crash.py
+    skip "crash-and-resume sweeps (~600 kill points)" "--quick"
+    skip "coverage: 100% on pure math" "--quick"
+    skip "coverage: >=98% on the rest" "--quick"
   else
-    run "test suite (all, incl. crash-and-resume sweep)" "$PY" -m pytest -q
-  fi
-
-  # ---- 5. coverage gates (same thresholds as CI) ----------------------------------------
-  if [ "$QUICK" = 1 ]; then
-    skip "coverage: 100% on pricing + allocation" "--quick"
-    skip "coverage: >=98% on exchanges, ledger, execution, recovery" "--quick"
-  else
-    run "coverage: 100% on pricing + allocation" "$PY" -m pytest -q --cov=oddtrue.pricing --cov=oddtrue.allocation --cov-branch --cov-fail-under=100
-    run "coverage: >=98% on exchanges, ledger, execution, recovery" "$PY" -m pytest -q --cov=oddtrue.exchanges --cov=oddtrue.ledger --cov=oddtrue.execution --cov=oddtrue.recovery --cov-branch --cov-fail-under=98
+    run "test suite (all, incl. crash-and-resume sweeps)" "$PY" -m pytest -q --cov=oddtrue --cov-branch
+    # ---- 5. coverage gates (same thresholds as CI), read from the run above ----------------------------------------
+    run "coverage: 100% on pure math (pricing, allocation, reconciliation maths)" "$PY" -m coverage report --include="$PURE" --fail-under=100
+    run "coverage: >=98% on exchanges, ledger, engine, recovery, reconciliation, safety, observability" "$PY" -m coverage report --include="$REST" --fail-under=98
   fi
 fi
 

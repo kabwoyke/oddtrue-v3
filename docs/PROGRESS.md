@@ -2,8 +2,8 @@
 
 Update at the end of every work session. Claude Code reads this at the start of every session.
 
-**Current phase:** 3 — Execution and recovery state machines (FakeExchange only)
-**Phase status:** AWAITING APPROVAL (exit criteria met, see session log; Phases 1 and 2 approved by owner 2026-10-22)
+**Current phase:** 4 — Reconciliation, freeze logic, observability
+**Phase status:** AWAITING APPROVAL (exit criteria met, see session log; Phase 3 approved by owner 2026-10-22)
 **Last updated:** 2026-10-22
 **Real-money activity so far:** none
 
@@ -14,8 +14,8 @@ Update at the end of every work session. Claude Code reads this at the start of 
 | 0 | Foundations and decisions | approved | Owner, 2026-10-22 | Decisions 1–3 recorded (D-019..D-021) |
 | 1 | Pure math core | approved | Owner, 2026-10-22 | D-022, D-023; 100% branch coverage |
 | 2 | Exchange interface, fake exchange, ledger | approved | Owner, 2026-10-22 | D-025 Postgres; 99% coverage on exchanges+ledger |
-| 3 | Execution + recovery state machines (fake exchange only) | awaiting approval | – | D-026, D-027, D-028; ~300 kill points swept; 99% coverage |
-| 4 | Reconciliation, freeze logic, observability | not started | – | |
+| 3 | Execution + recovery state machines (fake exchange only) | approved | Owner, 2026-10-22 | D-026, D-027, D-028; ~300 kill points swept; 99% coverage |
+| 4 | Reconciliation, freeze logic, observability | awaiting approval | – | D-029..D-031; 336 tests; 100% on pure math, 99% elsewhere |
 | 5 | Real adapters, read-only (5a Binance, 5b Bitget) | not started | – | No order/borrow endpoints reachable |
 | 6 | Testnet, then minimum-size live (6a, 6b) | not started | – | Needs explicit go-ahead for real money |
 | 7 | Paper/shadow trading at scale | not started | – | Several days minimum |
@@ -28,6 +28,16 @@ Status values: `not started` · `in progress` · `blocked` · `awaiting approval
 ## Current session log
 
 Newest first. One entry per session.
+
+### 2026-10-22 — Phase 4
+- Approval: owner said "phase 3 approved, move to phase 4". No open decision blocked this phase (notification channels, #15, are Phase 8, so alerts go through a channel interface).
+- Done: **Reconciliation** (`reconciliation/`): pure snapshot/expected/diff modules; `Reconciler` compares the exchanges with the last known-good snapshot plus settled legs, freezes only the affected client on a mismatch, defers while trades are in flight or a leg is unknown, reports "unavailable" without guessing, and lifts a freeze only by a clean recheck or an operator accepting the exchange state with a note. The engine reconciles before a trade (cancelling a drifted client's trade before money is at risk) and after it (parking the trade, not DONE, until resolved), and a leg-level mismatch also freezes. **Kill switches** (`safety/`): global, per-exchange and per-client halts, audit-logged, readiness-gated resume, authoritative database check inside trade creation; per-exchange auto-halt from consecutive infrastructure failures; an `InstrumentedAdapter` decorator that measures every call. **Observability** (`observability/`): JSON logs with trade context and redaction of keys, text and tracebacks, an in-process metrics registry with Prometheus output, and an alert hub that de-duplicates, persists, counts and pages. **Supervisor**: a sweep that resumes parked trades, reconciles idle clients, and raises loan-age, reserve and exchange-down alerts. Migration 0003 (audit log, halts, reconciliations, freezes, alerts).
+- Exit criteria, each with tests: induced mismatches freeze only the affected client (2 drifted among 21 clients -> exactly 2 frozen; a manual deposit, an unknown asset, a surprise loan, drift mid-trade, a leg-level mismatch); halts stop new trades but in-flight trades finish or recover (halt set mid-EXECUTING, halt during a parked recovery, exchange halt blocks only trades touching it, client pause isolated); all section 12 alerts demonstrably fire, page and persist (loan not zero after recovery timeout, reconciliation mismatch, unknown outcome unresolved, naked position, exchange down with in-flight trades, reserve below minimum, plus loan open too long).
+- Tests: 336 passing. 100% branch coverage on pricing, allocation and the three pure reconciliation modules; 99% on exchanges, ledger, engine, recovery, reconciliation, safety and observability (CI gates 100% / 98%, read from a single coverage run). A second crash-and-resume sweep (4 scenarios x every kill point, ~300 more) runs with the full safety stack and proves a crash anywhere never leaves a client falsely frozen and the books always reconcile. `scripts/verify.sh` runs everything in about 4 minutes.
+- Found and fixed along the way: the reserve-minimum alert paged for a healthy client with no margin wallet on its buy-side exchange (now only where a margin account exists); a bare `key=<value>` in free text slipped through redaction (now caught; short ordinary values are left alone); `StartRefused` now carries a reason; the entitlement/halt gate runs at `start()` as well as at revalidation.
+- Notes / limits: reconciliation costs about six private reads per client and runs before and after each trade; user-data streams are the planned optimisation (Phase 5/7). Any balance change not made by the engine (a deposit, a withdrawal, a manual trade) is a mismatch by design. Alerts reach a channel interface only; real channels (email, SMS, Telegram) are Phase 8. There is no operator console yet: operators use the Python API in docs/RUNBOOKS.md from an authenticated shell until the admin API (Phase 8). The client directory the supervisor needs is an interface until Phase 8a. Metrics are in-process with a Prometheus text renderer; no HTTP endpoint is exposed yet.
+- Blocked / needs owner: say "phase 4 approved" to begin Phase 5 (real Binance/Bitget adapters, read-only first; nothing in it may reach an order or borrow endpoint). Phase 5 needs API access to read the official docs and, for 5a/5b, read-only API keys for a test account - none have been requested or used so far. Numeric limits (#12) are still provisional.
+- Next: Phase 5a - Binance market data and account reads only, documented in docs/exchanges/binance.md.
 
 ### 2026-10-22 — Phase 3
 - Approval: owner said "move to phase 3" (treated as "phase 2 approved"). Two owner decisions taken during the phase: D-026 (naked short: escalating protected cover) and D-027 (settlement: pre-held inventory on B).
@@ -87,7 +97,7 @@ Mark each when its automated test passes.
 | 10 | Sell fails after borrowing → recovery, loan = 0 | [x] (Phase 3, FakeExchange: tests/test_engine_recovery.py) |
 | 11 | Rebalance (automatic / manual) | [ ] |
 | 12 | Dashboard + ROI presentation | [ ] |
-| 13 | Pause / resume | [ ] |
+| 13 | Pause / resume | [~] (Phase 4: halts/pause stop new trades only and are audit-logged; readiness checks on resume are Phase 8a) |
 | – | Client isolation | [ ] |
 | – | Key hygiene (no withdrawal permission) | [ ] |
 | – | Paid access / lapse mid-trade | [ ] |

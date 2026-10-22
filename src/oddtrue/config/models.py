@@ -63,6 +63,14 @@ class RiskConfig(_Frozen):
     repay_attempts: int = Field(default=3, ge=1)  # repay passes to absorb interest accrued while repaying
     recovery_slippage_ladder: tuple[Decimal, ...] = (Decimal("0.002"), Decimal("0.005"), Decimal("0.01"))
 
+    # Reconciliation, kill switches and alerting (Phase 4). PROVISIONAL until Phases 6-7 (decision #12).
+    reconcile_tolerance_coin: Decimal = Field(default=Decimal("0.00000001"), ge=0)  # per-asset balance difference
+    reconcile_tolerance_usdt: Decimal = Field(default=Decimal("0.01"), ge=0)
+    min_reserve_usdt: Decimal = Field(default=Decimal(10), ge=0)  # idle borrow-side USDT below this pages (rule 12)
+    loan_open_alert_s: int = Field(default=300, gt=0)  # a loan open longer than this pages
+    exchange_failure_threshold: int = Field(default=5, ge=1)  # consecutive failures that auto-halt one exchange
+    alert_dedupe_s: int = Field(default=60, ge=0)  # an identical alert inside this window is counted, not re-sent
+
     @model_validator(mode="after")
     def _split_sums_to_one(self) -> Self:
         if self.client_trade_pct + self.client_reserve_pct != Decimal(1):

@@ -8,6 +8,8 @@ Contract shared by every runner:
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import AsyncIterator
 from decimal import Decimal
 
 from oddtrue.exchanges.base import DUPLICATE_CLIENT_ID
@@ -27,7 +29,11 @@ from oddtrue.execution.deps import AlertKind
 from oddtrue.execution.gateway import Unresolved
 from oddtrue.ledger.models import EntryKind, LegStatus
 from oddtrue.ledger.repository import Leg
+from oddtrue.observability import metrics as m
+from oddtrue.observability.logging import get_logger, log_context
 from oddtrue.pricing.types import ZERO, Side
+
+log = get_logger("legs")
 
 TERMINAL_LEG = frozenset({LegStatus.FILLED, LegStatus.PARTIALLY_FILLED, LegStatus.EXPIRED, LegStatus.REJECTED})
 
@@ -47,6 +53,15 @@ _STATUS = {
 }
 
 
+@contextlib.asynccontextmanager
+async def _leg_scope(ctx: TradeCtx, leg_name: str, exchange: str) -> AsyncIterator[None]:
+    """Bind leg/exchange to every log line inside, and record how long the leg took (fill latency per leg)."""
+    started = ctx.deps.clock.now
+    with log_context(leg=leg_name, exchange=exchange):
+        yield
+        ctx.deps.metrics.observe(m.LEG_LATENCY, max(ctx.deps.clock.now - started, 0.0), leg=leg_name)
+
+
 async def _find(ctx: TradeCtx, leg_name: str, attempt: int) -> Leg | None:
     for leg in await ctx.deps.ledger.legs(ctx.plan.client_id, ctx.plan.trade_id):
         if leg.leg == leg_name and leg.attempt == attempt:
@@ -55,6 +70,12 @@ async def _find(ctx: TradeCtx, leg_name: str, attempt: int) -> Leg | None:
 
 
 async def _save_order(ctx: TradeCtx, leg: Leg, res: OrderResult) -> Leg:
+    fields = {
+        "client_order_id": leg.client_order_id,
+        "filled_qty": str(res.filled_qty),
+        "avg_price": str(res.avg_price),
+    }
+    log.info("leg %s %s", leg.leg, _STATUS[res.status].value, extra=fields)
     return await ctx.deps.ledger.update_leg(
         ctx.plan.client_id,
         leg.client_order_id,
@@ -68,6 +89,7 @@ async def _save_order(ctx: TradeCtx, leg: Leg, res: OrderResult) -> Leg:
 
 
 async def _mark(ctx: TradeCtx, leg: Leg, status: LegStatus, reason: str) -> Leg:
+    log.info("leg %s %s", leg.leg, status.value, extra={"client_order_id": leg.client_order_id, "reason": reason})
     return await ctx.deps.ledger.update_leg(
         ctx.plan.client_id, leg.client_order_id, status, filled_qty=ZERO if status is LegStatus.REJECTED else None,
         meta={"reason": reason},
@@ -101,6 +123,33 @@ async def run_order_leg(
     tif: TimeInForce = TimeInForce.IOC,
 ) -> Leg:
     """Place one protected limit order (never a market order) and return the leg in a settled state."""
+    exchange = ctx.plan.buy_exchange if on_a else ctx.plan.borrow_exchange
+    async with _leg_scope(ctx, leg_name, exchange):
+        return await _run_order_leg(
+            ctx,
+            leg_name=leg_name,
+            attempt=attempt,
+            on_a=on_a,
+            side=side,
+            qty=qty,
+            price=price,
+            account=account,
+            tif=tif,
+        )
+
+
+async def _run_order_leg(
+    ctx: TradeCtx,
+    *,
+    leg_name: str,
+    attempt: int,
+    on_a: bool,
+    side: Side,
+    qty: Decimal,
+    price: Decimal,
+    account: AccountType,
+    tif: TimeInForce = TimeInForce.IOC,
+) -> Leg:
     existing = await _find(ctx, leg_name, attempt)
     if existing is not None and existing.status in TERMINAL_LEG:
         return existing
@@ -139,6 +188,11 @@ async def run_order_leg(
 
 
 async def run_borrow(ctx: TradeCtx, qty: Decimal) -> Leg:
+    async with _leg_scope(ctx, B_BORROW, ctx.plan.borrow_exchange):
+        return await _run_borrow(ctx, qty)
+
+
+async def _run_borrow(ctx: TradeCtx, qty: Decimal) -> Leg:
     """Borrow ``qty`` on B once. The loan row (principal before) must already exist (written before sending)."""
     led, cid = ctx.deps.ledger, ctx.plan.client_id
     existing = await _find(ctx, B_BORROW, 1)
@@ -206,6 +260,13 @@ def _outstanding_before(leg: Leg) -> Decimal:
 
 
 async def run_repay(
+    ctx: TradeCtx, attempt: int, qty: Decimal, outstanding_before: Decimal, interest_before: Decimal
+) -> Leg:
+    async with _leg_scope(ctx, B_REPAY, ctx.plan.borrow_exchange):
+        return await _run_repay(ctx, attempt, qty, outstanding_before, interest_before)
+
+
+async def _run_repay(
     ctx: TradeCtx, attempt: int, qty: Decimal, outstanding_before: Decimal, interest_before: Decimal
 ) -> Leg:
     """Repay ``qty`` once (id derived from trade + leg + attempt). Ambiguity is resolved by re-reading the loan."""

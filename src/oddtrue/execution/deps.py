@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from enum import StrEnum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from oddtrue.config.models import RiskConfig
 from oddtrue.exchanges.base import ExchangeAdapter
 from oddtrue.ledger.repository import Ledger
+from oddtrue.observability.alerts import Alert, AlertKind, AlertSink, ListAlertSink
+from oddtrue.observability.metrics import Metrics
+
+if TYPE_CHECKING:
+    from oddtrue.reconciliation.reconciler import ReconResult
 
 
 class Clock(Protocol):
@@ -39,53 +43,18 @@ def to_datetime(epoch_s: float) -> datetime:
     return datetime.fromtimestamp(epoch_s, UTC)
 
 
-class AlertKind(StrEnum):
-    """Page-worthy conditions from CLAUDE.md section 12 (plus the context needed to act on them)."""
-
-    LOAN_NOT_ZERO_AFTER_RECOVERY_TIMEOUT = "loan_not_zero_after_recovery_timeout"
-    UNKNOWN_OUTCOME_UNRESOLVED = "unknown_outcome_unresolved"
-    NAKED_POSITION = "naked_position"
-    COVER_ESCALATION_EXHAUSTED = "cover_escalation_exhausted"
-    RESERVE_INSUFFICIENT = "reserve_insufficient"
-    RECONCILIATION_MISMATCH = "reconciliation_mismatch"
-    EXCHANGE_DOWN_IN_FLIGHT = "exchange_down_in_flight"
-    AUTH_INCIDENT = "auth_incident"
-    LOAN_PRESENT_BEFORE_TRADE = "loan_present_before_trade"
-    DUST_LEFT = "dust_left"
-
-
-@dataclass(frozen=True, slots=True)
-class Alert:
-    kind: AlertKind
-    client_id: str
-    trade_id: str
-    detail: str
-    page: bool = True
-
-
-class AlertSink(Protocol):
-    def raise_alert(self, alert: Alert) -> None: ...
-
-
-@dataclass(slots=True)
-class ListAlertSink:
-    alerts: list[Alert] = field(default_factory=list)
-
-    def raise_alert(self, alert: Alert) -> None:
-        self.alerts.append(alert)
-
-    def kinds(self) -> list[AlertKind]:
-        return [a.kind for a in self.alerts]
-
-
 class TradeGate(Protocol):
-    """Final eligibility check at revalidation (entitlement, halts, pause). Return a reason to block, else None."""
+    """Eligibility check for a NEW trade (entitlement, pause, halts). Return a reason to block, else None.
 
-    async def blocked_reason(self, client_id: str) -> str | None: ...
+    The database check in ``Ledger.create_trade_limited`` is authoritative for halts and freezes; this hook is for
+    everything else (e.g. paid entitlement in Phase 8d) and runs again at revalidation.
+    """
+
+    async def blocked_reason(self, client_id: str, exchanges: Sequence[str]) -> str | None: ...
 
 
 class OpenGate:
-    async def blocked_reason(self, client_id: str) -> str | None:
+    async def blocked_reason(self, client_id: str, exchanges: Sequence[str]) -> str | None:
         return None
 
 
@@ -96,6 +65,16 @@ class RebalanceEvaluator(Protocol):
 class NoRebalance:
     async def evaluate(self, client_id: str, trade_id: str) -> None:
         return None
+
+
+class BalanceReconciler(Protocol):
+    """Compares the exchanges' balances with the ledger's expectation and freezes the client on a mismatch."""
+
+    async def reconcile(
+        self, client_id: str, venues: Mapping[str, ExchangeAdapter], *, trigger: str, trade_id: str | None = None
+    ) -> ReconResult: ...
+
+    async def freeze_client(self, client_id: str, reason: str, trade_id: str | None = None) -> None: ...
 
 
 def no_checkpoint(name: str) -> None:
@@ -109,9 +88,29 @@ class EngineDeps:
     clock: Clock
     risk: RiskConfig
     alerts: AlertSink
+    metrics: Metrics = field(default_factory=Metrics)
     gate: TradeGate = field(default_factory=OpenGate)
     rebalance: RebalanceEvaluator = field(default_factory=NoRebalance)
+    reconciler: BalanceReconciler | None = None  # None = leg-level checks only (unit tests of the machine)
     # Called at every durable step. Tests raise from it to kill the "process" there (crash-and-resume tests).
     checkpoint: Callable[[str], None] = no_checkpoint
     op_timeout_override_s: float | None = None  # tests only: shorter real timeout than the integer-second config
     max_unfinished_per_client: int = 1
+
+
+__all__ = [
+    "Alert",
+    "AlertKind",
+    "AlertSink",
+    "BalanceReconciler",
+    "Clock",
+    "EngineDeps",
+    "ListAlertSink",
+    "NoRebalance",
+    "OpenGate",
+    "RebalanceEvaluator",
+    "SystemClock",
+    "TradeGate",
+    "no_checkpoint",
+    "to_datetime",
+]

@@ -43,6 +43,14 @@ class ConcurrencyLimit(LedgerError):
     """The client already has the maximum number of unfinished trades."""
 
 
+class TradeBlocked(LedgerError):
+    """A halt (global, exchange or client) or a client freeze forbids starting a new trade."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 @dataclass(frozen=True, slots=True)
 class NewTrade:
     id: str
@@ -85,6 +93,7 @@ class LoanRow:
     principal_before: Decimal
     borrowed_qty: Decimal | None
     verified_zero_at: datetime | None
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,6 +177,7 @@ def _loan(row: DictRow) -> LoanRow:
         principal_before=row["principal_before"],
         borrowed_qty=row["borrowed_qty"],
         verified_zero_at=row["verified_zero_at"],
+        created_at=row["created_at"],
     )
 
 
@@ -190,6 +200,36 @@ class Ledger:
     def __init__(self, conn: AsyncConnection[DictRow]) -> None:
         self._c = conn
         self._lock = _TaskLock()
+
+    @property
+    def connection(self) -> AsyncConnection[DictRow]:
+        """For the sibling stores in this package that share this connection and its lock."""
+        return self._c
+
+    @property
+    def lock(self) -> _TaskLock:
+        return self._lock
+
+    async def _blocked_reason(self, client_id: str, exchanges: Iterable[str]) -> str | None:
+        """Why a NEW trade for this client on these exchanges must not start, read from the database (never cached)."""
+        cur = await self._c.execute(
+            "SELECT scope, target FROM halts WHERE cleared_at IS NULL AND (scope = 'GLOBAL' "
+            "OR (scope = 'CLIENT' AND target = %s) OR (scope = 'EXCHANGE' AND target = ANY(%s))) ORDER BY id LIMIT 1",
+            (client_id, list(exchanges)),
+        )
+        halt = await cur.fetchone()
+        if halt is not None:
+            return {"GLOBAL": "global_halt", "EXCHANGE": f"exchange_halt:{halt['target']}", "CLIENT": "client_halt"}[
+                halt["scope"]
+            ]
+        cur = await self._c.execute(
+            "SELECT 1 AS frozen FROM client_freezes WHERE client_id = %s AND resolved_at IS NULL", (client_id,)
+        )
+        return "client_frozen" if await cur.fetchone() is not None else None
+
+    @_serialized
+    async def blocked_reason(self, client_id: str, exchanges: Iterable[str]) -> str | None:
+        return await self._blocked_reason(client_id, exchanges)
 
     # ---- trades ----------------------------------------
     @_serialized
@@ -231,6 +271,9 @@ class Ledger:
         at = at or _now()
         async with self._c.transaction():
             await self._c.execute("SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))", (t.client_id,))
+            blocked = await self._blocked_reason(t.client_id, (t.buy_exchange, t.borrow_exchange))
+            if blocked is not None:  # authoritative check, atomic with creating the trade
+                raise TradeBlocked(blocked)
             cur = await self._c.execute(
                 "SELECT count(*) AS n FROM trades WHERE client_id = %s AND outcome IS NULL", (t.client_id,)
             )
@@ -407,15 +450,22 @@ class Ledger:
     # ---- loans ----------------------------------------
     @_serialized
     async def open_loan(
-        self, client_id: str, trade_id: str, exchange: str, asset: str, principal_before: Decimal
+        self,
+        client_id: str,
+        trade_id: str,
+        exchange: str,
+        asset: str,
+        principal_before: Decimal,
+        *,
+        at: datetime | None = None,
     ) -> LoanRow:
         """Record that a borrow is about to be sent (persist first). Idempotent per trade/exchange/asset."""
         async with self._c.transaction():
             await self._c.execute(
-                "INSERT INTO loans (trade_id, client_id, exchange, asset, principal_before) "
-                "SELECT t.id, t.client_id, %s, %s, %s FROM trades t WHERE t.id = %s AND t.client_id = %s "
+                "INSERT INTO loans (trade_id, client_id, exchange, asset, principal_before, created_at) "
+                "SELECT t.id, t.client_id, %s, %s, %s, %s FROM trades t WHERE t.id = %s AND t.client_id = %s "
                 "ON CONFLICT (trade_id, exchange, asset) DO NOTHING",
-                (exchange, asset, principal_before, trade_id, client_id),
+                (exchange, asset, principal_before, at or _now(), trade_id, client_id),
             )
             cur = await self._c.execute(
                 "SELECT * FROM loans WHERE trade_id = %s AND client_id = %s AND exchange = %s AND asset = %s",

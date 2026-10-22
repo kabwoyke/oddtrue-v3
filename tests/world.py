@@ -105,3 +105,87 @@ def build_world(ledger: Ledger, **cfg: Any) -> World:
 
 
 CheckpointFn = Callable[[str], None]
+
+
+# ---- the Phase 4 safety stack ----------------------------------------
+
+from collections.abc import Mapping, Sequence  # noqa: E402
+
+from oddtrue.exchanges.base import ExchangeAdapter  # noqa: E402
+from oddtrue.execution.supervisor import Supervisor  # noqa: E402
+from oddtrue.ledger.safety import SafetyLedger  # noqa: E402
+from oddtrue.observability.alerts import Alert, AlertHub  # noqa: E402
+from oddtrue.observability.metrics import Metrics  # noqa: E402
+from oddtrue.reconciliation.reconciler import Reconciler  # noqa: E402
+from oddtrue.safety.halts import HaltController  # noqa: E402
+
+
+@dataclass(slots=True)
+class RecordingChannel:
+    """Stands in for the pager / email / Telegram: records what would have been sent."""
+
+    paged: list[Alert] = field(default_factory=list)
+
+    async def notify(self, alert: Alert) -> None:
+        self.paged.append(alert)
+
+
+@dataclass(slots=True)
+class Safe:
+    world: World
+    metrics: Metrics
+    hub: AlertHub
+    channel: RecordingChannel
+    reconciler: Reconciler
+    halts: HaltController
+    safety: SafetyLedger
+
+    def engine(self, **over: Any) -> TradeEngine:
+        base: dict[str, Any] = {
+            "alerts": self.hub, "metrics": self.metrics, "reconciler": self.reconciler, "gate": self.halts
+        }  # fmt: skip
+        base.update(over)
+        return self.world.engine(**base)
+
+    def kinds(self) -> list[str]:
+        return [k.value for k in self.hub.kinds()]
+
+
+def build_safe(world: World) -> Safe:
+    metrics, channel = Metrics(), RecordingChannel()
+    safety = SafetyLedger(world.ledger)
+    hub = AlertHub(world.clock, metrics, store=safety, channels=(channel,), dedupe_s=world.cfg.alert_dedupe_s)
+    reconciler = Reconciler(world.ledger, world.cfg, world.clock, hub, metrics)
+    halts = HaltController(world.ledger, world.clock, hub, metrics)
+    return Safe(world, metrics, hub, channel, reconciler, halts, safety)
+
+
+class Directory:
+    """A ClientDirectory over fixed venues, for supervisor tests."""
+
+    def __init__(self, safe: Safe, clients: Mapping[str, Mapping[str, ExchangeAdapter]]) -> None:
+        self.safe, self.clients = safe, dict(clients)
+
+    async def client_ids(self) -> Sequence[str]:
+        return list(self.clients)
+
+    def venues_for(self, client_id: str) -> Mapping[str, ExchangeAdapter]:
+        return self.clients[client_id]
+
+    def engine_for(self, client_id: str) -> TradeEngine:
+        return self.safe.engine(venues=self.clients[client_id])
+
+    def supervisor(self) -> Supervisor:
+        s = self.safe
+        return Supervisor(self, s.world.ledger, s.reconciler, s.world.cfg, s.world.clock, s.hub, s.metrics)
+
+
+def add_client(
+    world: World, client: str, usdt: str = "1000", margin_usdt: str = "500", btc: str = "0.01"
+) -> dict[str, Any]:
+    """A second funded client on the same two venues (isolation tests). Returns that client's venue map."""
+    a, b = world.a.account(client), world.b.account(client)
+    a.fund(SPOT, "USDT", D(usdt))
+    b.fund(MARGIN, "USDT", D(margin_usdt))
+    b.fund(MARGIN, "BTC", D(btc))
+    return {"binance": a, "bitget": b}

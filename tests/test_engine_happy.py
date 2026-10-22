@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal as D
 
 import pytest
@@ -131,14 +132,31 @@ async def test_cancel_when_revalidation_finds_the_edge_gone_after_prechecks(worl
     assert await world.ledger.legs("john", "t1") == []
 
 
-async def test_cancel_when_entitlement_gate_blocks(world: World) -> None:
-    class Lapsed:
-        async def blocked_reason(self, client_id: str) -> str | None:
-            return "entitlement_lapsed"
+class _Gate:
+    def __init__(self, blocked: bool) -> None:
+        self.blocked = blocked
 
-    result = await world.engine(gate=Lapsed()).start(world.plan())
+    async def blocked_reason(self, client_id: str, exchanges: Sequence[str]) -> str | None:
+        return "entitlement_lapsed" if self.blocked else None
+
+
+async def test_a_blocking_gate_refuses_before_any_trade_exists(world: World) -> None:
+    with pytest.raises(StartRefused, match="entitlement_lapsed"):
+        await world.engine(gate=_Gate(True)).start(world.plan())
+    assert await world.ledger.unfinished_trades() == []
+
+
+async def test_cancel_when_the_gate_closes_between_start_and_revalidation(world: World) -> None:
+    gate = _Gate(False)
+
+    def lapse(name: str) -> None:
+        if name == "state:PRECHECK_BORROW":
+            gate.blocked = True  # e.g. the subscription lapses while the pre-checks run
+
+    result = await world.engine(gate=gate, checkpoint=lapse).start(world.plan())
     assert result.state is TradeState.CANCELLED
     assert (await world.ledger.state_history("john", "t1"))[-1][2] == "gate:entitlement_lapsed"
+    assert await world.ledger.legs("john", "t1") == []
 
 
 async def test_cancel_when_keys_lack_margin_or_borrow_permission(world: World) -> None:

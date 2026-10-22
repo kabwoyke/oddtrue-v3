@@ -88,6 +88,23 @@ session and must **ask** (not guess) about any item still OPEN that blocks the c
 - Decision: Every fill is booked from the exchange result: BUY_COST / SELL_PROCEEDS (USDT notional, coin qty), coin-denominated fees converted at the fill price into FEE. Gross profit of a trade = sell proceeds - buy cost over all its fills, so unwinds and covers show up as losses automatically. Slippage is NOT booked separately (it is already inside actual fill prices; booking it would double count). Interest repaid from wallet coin is booked as INTEREST at the B sell price; coin bought only to cover a repay shortfall is booked as RECOVERY_COST (notional) and is excluded from INTEREST. Entries are written once per (leg, kind) so a crash-and-resume never double-books. Coin inventory moving between exchanges is not P&L.
 - Decided by: Claude (implementation convention; owner may revise)
 
+### D-029 — Reconciliation model: last known-good snapshot + settled legs
+- Date: 2026-10-22
+- Context: exchange state is the truth and the ledger is the expectation (rule 7), but the ledger holds USDT-level P&L, not balances.
+- Decision: For an IDLE client the expected balances are its last known-good snapshot (`BASELINE`, `OK` or operator-`ACCEPTED`) plus the effect of every settled leg since (`apply_legs`: fills, coin fees, borrow and repay quantities). Liabilities are not rebuilt from legs: a trade only finishes once the exchange reports a zero loan, so an idle client's expected liability is its baseline's. Differences beyond `reconcile_tolerance_coin` / `reconcile_tolerance_usdt` are a mismatch. Reconciliation runs before a trade (a drifted client is frozen and the trade cancelled before any money is at risk), after a trade, and every supervisor sweep. It is deferred (not guessed) while another trade is in flight or any leg has an unknown outcome, and "unavailable" (no conclusion, no freeze) when the exchanges cannot be read. Any other balance change - a deposit, a withdrawal, a manual trade by the client - is by design a mismatch.
+- Consequences: costs about six private reads per reconciliation; moving to user-data streams is a Phase 5/7 optimisation. The first-ever reconciliation of a client only records a baseline.
+- Decided by: Claude (design; owner may revise)
+
+### D-030 — Freeze and halt semantics
+- Date: 2026-10-22
+- Decision: A mismatch freezes that client only (one active freeze per client, enforced by a unique index). A freeze is lifted by (a) a clean recheck, or (b) an operator accepting the exchange's state with a mandatory note, which re-baselines; both are audit-logged. A frozen client is skipped by the sweep, never auto-resolved. Halts (GLOBAL, EXCHANGE, CLIENT) stop only NEW trades. The check is made from the database inside the same transaction that creates the trade, so it cannot be bypassed by a race, and again at revalidation; in-flight trades, recovery and settlement are never blocked by a halt or a freeze. N consecutive infrastructure failures (not business or credential errors) auto-halt that one exchange; lifting it is always a human action. Resuming a paused client runs a readiness check hook (spec section 56, supplied in Phase 8a).
+- Decided by: Claude (design, from CLAUDE.md rules 7 and 10; owner may revise)
+
+### D-031 — Observability conventions
+- Date: 2026-10-22
+- Decision: Logs are one JSON object per line carrying trade_id, client_id, exchange, leg, state, client_order_id from a context variable; redaction happens in the formatter so it also covers messages, extra fields and tracebacks (secret-looking field names, `name=value` text, bearer tokens, long key-shaped values, and any value registered with `register_secret`). Metrics are an in-process registry with Prometheus text output and low-cardinality labels only (never trade or client ids). Alerts are persisted, de-duplicated for `alert_dedupe_s`, counted, and page-worthy ones go to notification channels; a failing channel or database never breaks trading. The alert for a reserve below `min_reserve_usdt` applies only to exchanges where the client keeps a margin account. Notification channels themselves are Phase 8 (decision #15).
+- Decided by: Claude (design; owner may revise)
+
 ## Template for new entries
 
 ```

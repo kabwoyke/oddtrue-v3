@@ -68,6 +68,8 @@ recommended).
 6. No row for client X is readable via any client-API call authenticated as client Y.
 
 ## Implementation status
+Phase 4 adds migration `0003_safety.sql`: `audit_log` (append-only by trigger), `halts` (one active halt per scope/target by unique index; scope GLOBAL/EXCHANGE/CLIENT), `reconciliations` (status BASELINE/OK/MISMATCH/ACCEPTED with expected, actual and diff as JSON), `client_freezes` (one active freeze per client by unique index) and `alerts`. `Ledger.create_trade_limited` refuses a new trade for a halted or frozen client inside the same locked transaction that creates it.
+
 Phase 3 adds migration `0002_execution.sql`: `trades.plan` (JSONB, the persisted `TradePlan`), `trade_legs.meta` (JSONB: limit price, interest/outstanding before a repay, reasons), the `loans` table (opened before a borrow is sent; `verified_zero_at` set only after the exchange reports 0), a unique index so each (leg, entry kind) is booked once, and a trigger that blocks a trade from reaching DONE/CANCELLED while any of its loans is unverified (invariant 2, enforced by the database). Invariant 5 (client order id persisted before sending) is covered by the crash-and-resume sweep, which asserts the exchanges never saw an id the ledger does not hold.
 
 Phase 2 implements `trades`, `trade_legs`, `ledger_entries`, `trade_state_log`, `rotation_log` (migration `0001_init.sql`, Postgres, D-025). `trade_results` is derived on read from ledger entries. Invariants 1 and 5 and the client-isolation half of 6 are tested in `tests/test_ledger.py`; the rest arrive with their tables.
