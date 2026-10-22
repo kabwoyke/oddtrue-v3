@@ -10,6 +10,7 @@ Nothing here sleeps for real: latency advances the fake clock only.
 from __future__ import annotations
 
 import asyncio
+import math
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from decimal import ROUND_UP, Decimal
@@ -102,6 +103,8 @@ class FaultKind(StrEnum):
     RATE_LIMIT = "rate_limit"
     EXCHANGE_DOWN = "exchange_down"
     AUTH_ERROR = "auth_error"
+    HANG_NOT_APPLIED = "hang_not_applied"  # never returns (caller's hard timeout must fire); action did NOT happen
+    HANG_APPLIED = "hang_applied"  # applies the action, then never returns
     PARTIAL_FILL = "partial_fill"  # IOC orders only: fill ``fraction`` of the quantity
     STALE_BOOK = "stale_book"  # get_orderbook returns a snapshot ``age_s`` seconds old
 
@@ -137,7 +140,8 @@ class _Book:
 class _LoanState:
     principal: Decimal = ZERO
     interest: Decimal = ZERO
-    last_ts: float = 0.0
+    opened_ts: float | None = None  # when the principal went from 0 to >0
+    hours_charged: int = 0
 
 
 _DROP = object()
@@ -276,11 +280,17 @@ class FakeVenue:
             raise AuthError("injected", exchange=self.name)
         if k is FaultKind.TIMEOUT_NOT_APPLIED:
             raise UnknownOutcome(operation=op.value, client_id=key, exchange=self.name)
-        return fault  # TIMEOUT_APPLIED, PARTIAL_FILL, STALE_BOOK are handled by the caller
+        if k is FaultKind.HANG_NOT_APPLIED:
+            await asyncio.Event().wait()
+        return fault  # TIMEOUT_APPLIED, HANG_APPLIED, PARTIAL_FILL, STALE_BOOK are handled by the caller
 
-    def _post(self, fault: Fault | None, op: Op, key: str | None) -> None:
-        if fault is not None and fault.kind is FaultKind.TIMEOUT_APPLIED:
+    async def _post(self, fault: Fault | None, op: Op, key: str | None) -> None:
+        if fault is None:
+            return
+        if fault.kind is FaultKind.TIMEOUT_APPLIED:
             raise UnknownOutcome(operation=op.value, client_id=key, exchange=self.name)
+        if fault.kind is FaultKind.HANG_APPLIED:
+            await asyncio.Event().wait()
 
 
 class FakeAccount(ExchangeAdapter):
@@ -294,6 +304,7 @@ class FakeAccount(ExchangeAdapter):
         self._borrow_ids: dict[str, BorrowResult] = {}
         self._repay_ids: dict[str, RepayResult] = {}
         self._transfers: dict[str, TransferStatus] = {}
+        self.duplicate_rejections = 0  # a correct engine never re-sends a persisted id: tests assert this stays 0
 
     @property
     def name(self) -> str:
@@ -314,11 +325,19 @@ class FakeAccount(ExchangeAdapter):
             raise AuthError(f"missing permission: {what}", exchange=self.name, code="permission")
 
     def _accrue(self, asset: str) -> _LoanState:
-        st = self._loans.setdefault(asset, _LoanState(last_ts=self._v.clock.now))
-        hours = Decimal(str((self._v.clock.now - st.last_ts) / _HOUR))
-        if hours > 0 and st.principal > 0:
-            st.interest += _q8(st.principal * self._v._borrow_rate.get(asset, ZERO) * hours)
-        st.last_ts = self._v.clock.now
+        """Interest is charged per started hour (the first hour the moment the loan opens), never continuously.
+
+        This is an assumption about the exchanges (to be verified in Phase 5): it matches hourly billing and keeps
+        "loan == 0" stable between the final repay and its verification.
+        """
+        st = self._loans.setdefault(asset, _LoanState())
+        if st.principal > 0 and st.opened_ts is not None:
+            elapsed_h = (self._v.clock.now - st.opened_ts) / _HOUR
+            due = max(1, math.ceil(elapsed_h))
+            rate = self._v._borrow_rate.get(asset, ZERO)
+            for _ in range(due - st.hours_charged):
+                st.interest += _q8(st.principal * rate)
+            st.hours_charged = max(st.hours_charged, due)
         return st
 
     # ---- market data ----------------------------------------
@@ -399,6 +418,7 @@ class FakeAccount(ExchangeAdapter):
     async def place_order(self, req: OrderRequest) -> OrderResult:
         fault = await self._v._enter(Op.PLACE_ORDER, self.client_id, req.client_order_id)
         if req.client_order_id in self._orders:
+            self.duplicate_rejections += 1
             raise Rejected("duplicate client order id", exchange=self.name, code=DUPLICATE_CLIENT_ID)
         self._need(self.permissions.trade, "trade")
         if req.account is AccountType.MARGIN:
@@ -454,7 +474,7 @@ class FakeAccount(ExchangeAdapter):
             fee_asset=fee_asset,
         )
         self._orders[req.client_order_id] = result
-        self._v._post(fault, Op.PLACE_ORDER, req.client_order_id)
+        await self._v._post(fault, Op.PLACE_ORDER, req.client_order_id)
         return result
 
     def _validate_order(self, req: OrderRequest, rules: SymbolRules) -> None:
@@ -496,7 +516,7 @@ class FakeAccount(ExchangeAdapter):
         order = self._orders.get(client_order_id)
         if order is None or order.symbol != symbol or order.account is not account:
             raise Rejected("order not found", exchange=self.name, code=ORDER_NOT_FOUND)
-        self._v._post(fault, Op.GET_ORDER, client_order_id)
+        await self._v._post(fault, Op.GET_ORDER, client_order_id)
         return order
 
     async def cancel_order(self, client_order_id: str, symbol: str, account: AccountType) -> OrderResult:
@@ -510,6 +530,7 @@ class FakeAccount(ExchangeAdapter):
     async def borrow(self, asset: str, qty: Decimal, client_id: str) -> BorrowResult:
         fault = await self._v._enter(Op.BORROW, self.client_id, client_id)
         if client_id in self._borrow_ids:
+            self.duplicate_rejections += 1
             raise Rejected("duplicate client id", exchange=self.name, code=DUPLICATE_CLIENT_ID)
         self._need(self.permissions.margin and self.permissions.borrow, "margin borrow")
         if qty <= 0:
@@ -517,18 +538,25 @@ class FakeAccount(ExchangeAdapter):
         if qty > self._borrowable(asset):
             raise Rejected("exceeds borrowable", exchange=self.name, code="borrow_limit")
         st = self._accrue(asset)
-        st.principal += qty
+        if st.principal == ZERO:
+            st.opened_ts, st.hours_charged = self._v.clock.now, 0
+            st.principal = qty
+            self._accrue(asset)  # the first hour is charged at once
+        else:
+            st.principal += qty
+            st.interest += _q8(qty * self._v._borrow_rate.get(asset, ZERO))  # top-up pays the current hour
         self._v._borrow_pool[asset] = self._v._borrow_pool.get(asset, ZERO) - qty
         margin = self._bal[AccountType.MARGIN]
         margin[asset] = margin.get(asset, ZERO) + qty
         result = BorrowResult(client_id, asset, qty)
         self._borrow_ids[client_id] = result
-        self._v._post(fault, Op.BORROW, client_id)
+        await self._v._post(fault, Op.BORROW, client_id)
         return result
 
     async def repay(self, asset: str, qty: Decimal, client_id: str) -> RepayResult:
         fault = await self._v._enter(Op.REPAY, self.client_id, client_id)
         if client_id in self._repay_ids:
+            self.duplicate_rejections += 1
             raise Rejected("duplicate client id", exchange=self.name, code=DUPLICATE_CLIENT_ID)
         self._need(self.permissions.margin, "margin")
         st = self._accrue(asset)
@@ -542,10 +570,12 @@ class FakeAccount(ExchangeAdapter):
         st.interest -= to_interest
         to_principal = qty - to_interest
         st.principal -= to_principal
+        if st.principal == ZERO:
+            st.opened_ts, st.hours_charged = None, 0
         self._v._borrow_pool[asset] = self._v._borrow_pool.get(asset, ZERO) + to_principal
         result = RepayResult(client_id, asset, qty, Loan(asset, st.principal, st.interest))
         self._repay_ids[client_id] = result
-        self._v._post(fault, Op.REPAY, client_id)
+        await self._v._post(fault, Op.REPAY, client_id)
         return result
 
     async def get_loan(self, asset: str) -> Loan:
@@ -569,7 +599,7 @@ class FakeAccount(ExchangeAdapter):
         spot[asset] -= qty
         status = TransferStatus(client_id, asset, qty, TransferState.COMPLETED)
         self._transfers[client_id] = status
-        self._v._post(fault, Op.WITHDRAW, client_id)
+        await self._v._post(fault, Op.WITHDRAW, client_id)
         return status
 
     async def get_transfer_status(self, client_id: str) -> TransferStatus:

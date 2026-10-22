@@ -30,7 +30,7 @@ def test_shipped_configs_load_with_decimals() -> None:
     assert risk.client_reserve_pct == Decimal("0.05")
     assert risk.market_liquidity_pct == Decimal("0.90")
     assert risk.mode is Mode.PAPER
-    assert risk.settlement_method is SettlementMethod.BUY_ON_BORROW_SIDE
+    assert risk.settlement_method is SettlementMethod.PREHELD_INVENTORY
     assert load_scale(CONFIG_DIR / "scale.yaml").max_active_clients == 5
     assert not load_pairs(CONFIG_DIR / "pairs.yaml").is_tradable("BTCUSDT")
 
@@ -80,3 +80,31 @@ def test_live_min_needs_allowlist() -> None:
 def test_unknown_mode_is_error_not_live() -> None:
     with pytest.raises(ConfigError):
         resolve_mode(_risk(), {"ODDTRUE_MODE": "prod"})
+
+
+@pytest.mark.parametrize(
+    "ladder",
+    [
+        (),
+        (Decimal("1"),),
+        (Decimal("-0.1"),),
+        (Decimal("0.005"), Decimal("0.002")),
+        (Decimal("0.002"), Decimal("0.002")),
+    ],
+)
+def test_recovery_ladder_must_be_escalating_and_bounded(ladder: tuple[Decimal, ...]) -> None:
+    with pytest.raises(ValidationError):
+        _risk(recovery_slippage_ladder=ladder)
+
+
+def test_recovery_ladder_and_execution_limits_ship_with_safe_defaults() -> None:
+    risk = load_risk(CONFIG_DIR / "risk.yaml")
+    assert risk.recovery_slippage_ladder == (Decimal("0.002"), Decimal("0.005"), Decimal("0.01"))
+    assert risk.execution_timeout_s > 0 and risk.unknown_resolve_attempts >= 1 and risk.repay_attempts >= 1
+
+
+def test_non_mapping_config_is_rejected(tmp_path: Path) -> None:
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("- just\n- a list\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        load_risk(bad)

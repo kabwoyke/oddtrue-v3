@@ -28,6 +28,7 @@ class Check(StrEnum):
     MIN_ROI = "net_roi_below_minimum"
     RECOVERY_INTEREST_RESERVE = "recovery_interest_exceeds_reserve"
     LOAN_NOT_ZERO = "outstanding_loan_not_zero"
+    REPAY_COIN = "repay_coin_unavailable_on_borrow_side"
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +59,9 @@ class TradeProposal:
     recovery_interest_usdt: Decimal | None = None
     reserve_usdt: Decimal | None = None
     outstanding_loan_after_recovery: Decimal | None = None
+    # Settlement feasibility (D-027): coin that must be on the borrow side to repay principal + estimated interest.
+    repay_coin_needed: Decimal | None = None
+    repay_coin_available: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,6 +75,37 @@ class ValidationResult:
     @property
     def reason(self) -> Failure | None:
         return self.failures[0] if self.failures else None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryProposal:
+    """The recovery-time terms of spec section 41, for use while a trade is already in RECOVERY."""
+
+    recovery_interest_usdt: Decimal | None = None
+    reserve_usdt: Decimal | None = None
+    outstanding_loan_after_recovery: Decimal | None = None
+
+
+def _recovery_failures(
+    interest_usdt: Decimal | None, reserve_usdt: Decimal | None, outstanding_loan: Decimal | None
+) -> list[Failure]:
+    """Single implementation of the recovery terms; ``validate_trade`` and ``validate_recovery`` both use it."""
+    fails: list[Failure] = []
+    if interest_usdt is not None:
+        reserve = reserve_usdt if reserve_usdt is not None else ZERO
+        if interest_usdt > reserve:
+            fails.append(
+                Failure(Check.RECOVERY_INTEREST_RESERVE, "sell", f"interest={interest_usdt} > reserve={reserve}")
+            )
+    if outstanding_loan is not None and outstanding_loan != ZERO:
+        fails.append(Failure(Check.LOAN_NOT_ZERO, "sell", f"loan={outstanding_loan}"))
+    return fails
+
+
+def validate_recovery(r: RecoveryProposal) -> ValidationResult:
+    return ValidationResult(
+        failures=tuple(_recovery_failures(r.recovery_interest_usdt, r.reserve_usdt, r.outstanding_loan_after_recovery))
+    )
 
 
 def validate_trade(t: TradeProposal) -> ValidationResult:
@@ -112,12 +147,11 @@ def validate_trade(t: TradeProposal) -> ValidationResult:
     if not meets_min_roi(t.expected_net_roi_pct, t.min_net_roi_pct):
         fail(Check.MIN_ROI, "-", f"roi={t.expected_net_roi_pct} < min={t.min_net_roi_pct}")
 
-    if t.recovery_interest_usdt is not None:
-        reserve = t.reserve_usdt if t.reserve_usdt is not None else ZERO
-        if t.recovery_interest_usdt > reserve:
-            fail(Check.RECOVERY_INTEREST_RESERVE, "sell", f"interest={t.recovery_interest_usdt} > reserve={reserve}")
+    if t.repay_coin_needed is not None:
+        available = t.repay_coin_available if t.repay_coin_available is not None else ZERO
+        if available < t.repay_coin_needed:
+            fail(Check.REPAY_COIN, "sell", f"available={available} < needed={t.repay_coin_needed}")
 
-    if t.outstanding_loan_after_recovery is not None and t.outstanding_loan_after_recovery != ZERO:
-        fail(Check.LOAN_NOT_ZERO, "sell", f"loan={t.outstanding_loan_after_recovery}")
+    fails.extend(_recovery_failures(t.recovery_interest_usdt, t.reserve_usdt, t.outstanding_loan_after_recovery))
 
     return ValidationResult(failures=tuple(fails))

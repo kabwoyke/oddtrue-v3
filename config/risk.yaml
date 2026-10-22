@@ -18,5 +18,14 @@ recovery_timeout_s: 120        # PROVISIONAL
 
 max_exposure_per_client_usdt: "1000"    # PROVISIONAL
 max_exposure_global_usdt: "50000"       # PROVISIONAL
-settlement_method: "buy_on_borrow_side"  # buy_on_borrow_side | preheld_inventory | transfer_to_borrow_side (D-020)
+settlement_method: "preheld_inventory"  # preheld_inventory | transfer_to_borrow_side | buy_on_borrow_side (D-027 supersedes D-020)
 margin_mode: "cross"                     # provisional, verify in Phase 5 (D-021)
+
+# Execution and recovery (Phase 3), all PROVISIONAL (decision #12)
+max_book_age_s: "2"                  # order book older than this fails the pre-check
+execution_timeout_s: 30              # hard bound for the whole EXECUTING phase
+unknown_resolve_attempts: 3          # queries by client order id before an order is deemed never placed
+unknown_resolve_backoff_s: "0.5"
+expected_loan_seconds: 60            # loan duration assumed in the interest estimate
+repay_attempts: 3                    # repay passes (interest keeps accruing while we repay)
+recovery_slippage_ladder: ["0.002", "0.005", "0.01"]   # escalating cover (D-026); last value is the hard cap

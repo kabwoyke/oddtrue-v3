@@ -3,6 +3,16 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: oddtrue
+          POSTGRES_PASSWORD: oddtrue_dev
+          POSTGRES_DB: oddtrue
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U oddtrue" --health-interval 2s --health-timeout 3s --health-retries 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,5 +24,11 @@ jobs:
       - run: ruff check .
       - run: mypy
       - run: pytest
+        env:
+          CI: "true"  # DB tests must run in CI, never skip
       - name: 100% branch coverage on pure math (CLAUDE.md phase 1 exit)
         run: pytest -q --cov=oddtrue.pricing --cov=oddtrue.allocation --cov-branch --cov-fail-under=100
+      - name: coverage on exchanges, ledger, execution, recovery (Phase 2-3 exit)
+        run: pytest -q --cov=oddtrue.exchanges --cov=oddtrue.ledger --cov=oddtrue.execution --cov=oddtrue.recovery --cov-branch --cov-fail-under=98
+        env:
+          CI: "true"

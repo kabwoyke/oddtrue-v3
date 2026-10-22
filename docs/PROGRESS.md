@@ -2,8 +2,8 @@
 
 Update at the end of every work session. Claude Code reads this at the start of every session.
 
-**Current phase:** 1 — Pure math core
-**Phase status:** AWAITING APPROVAL (exit criteria met, see session log; Phase 0 approved by owner 2026-10-22)
+**Current phase:** 3 — Execution and recovery state machines (FakeExchange only)
+**Phase status:** AWAITING APPROVAL (exit criteria met, see session log; Phases 1 and 2 approved by owner 2026-10-22)
 **Last updated:** 2026-10-22
 **Real-money activity so far:** none
 
@@ -12,9 +12,9 @@ Update at the end of every work session. Claude Code reads this at the start of 
 | Phase | Name | Status | Approved by owner | Notes |
 |---|---|---|---|---|
 | 0 | Foundations and decisions | approved | Owner, 2026-10-22 | Decisions 1–3 recorded (D-019..D-021) |
-| 1 | Pure math core | awaiting approval | – | D-022, D-023; 100% branch coverage |
-| 2 | Exchange interface, fake exchange, ledger | not started | – | |
-| 3 | Execution + recovery state machines (fake exchange only) | not started | – | Most important phase |
+| 1 | Pure math core | approved | Owner, 2026-10-22 | D-022, D-023; 100% branch coverage |
+| 2 | Exchange interface, fake exchange, ledger | approved | Owner, 2026-10-22 | D-025 Postgres; 99% coverage on exchanges+ledger |
+| 3 | Execution + recovery state machines (fake exchange only) | awaiting approval | – | D-026, D-027, D-028; ~300 kill points swept; 99% coverage |
 | 4 | Reconciliation, freeze logic, observability | not started | – | |
 | 5 | Real adapters, read-only (5a Binance, 5b Bitget) | not started | – | No order/borrow endpoints reachable |
 | 6 | Testnet, then minimum-size live (6a, 6b) | not started | – | Needs explicit go-ahead for real money |
@@ -28,6 +28,25 @@ Status values: `not started` · `in progress` · `blocked` · `awaiting approval
 ## Current session log
 
 Newest first. One entry per session.
+
+### 2026-10-22 — Phase 3
+- Approval: owner said "move to phase 3" (treated as "phase 2 approved"). Two owner decisions taken during the phase: D-026 (naked short: escalating protected cover) and D-027 (settlement: pre-held inventory on B).
+- Found before building: D-020's default (buy the coin back on B to repay) captures no arbitrage profit; owner chose pre-held inventory (D-027). Caveat recorded: with enough B inventory a direct sale would match the proceeds without borrowing, so the borrow adds only a billed hour of interest. Revisit with Phase 6/7 data.
+- Done: `execution/` (states, persisted `TradePlan`, injected deps/clock/alerts/gate/rebalance hook, `Gateway` with hard timeouts and query-by-client-id resolution, leg runners, engine with pre-checks, revalidation through the single `validate_trade`, concurrent A-buy and B borrow->protected-sell under one time limit, reconciling) and `recovery/` (exposure derived from persisted legs, escalating protected ladder, naked-short cover, surplus unwind, shortfall purchase within the 5% reserve, full repay with API-verified loan == 0, recovery deadline alerts). Migration 0002 (plan, leg meta, loans, once-per-leg entries, DB guard against finishing with an unverified loan). `validate_recovery` shares the recovery terms with `validate_trade`. Fake exchange: hang faults, hourly interest billing, duplicate counter.
+- Tests: 235 passing, 99% branch coverage on pricing, allocation, exchanges, ledger, execution, recovery (CI gates: 100% pure math, 98% the rest). Scenarios: success with hand-computed figures; 15 pre-check cancellations; sell rejected / protected sell unfilled / borrow rejected / everything fails / neither order fills; A buy fails after B sold (naked short); A and B partial fills; escalating cover and exhausted cover; interest purchase from the reserve and reserve too small; timeouts that fill and that do not (buy, sell, borrow, repay) never re-sent; hangs under the hard limit; execution time limit; unresolvable outcomes hold and resume; exchange down, rate limit, auth failure; reconciliation mismatch; late-appearing loan; 3 clients at once. Crash-and-resume sweep: 6 scenarios x every checkpoint (~300 kill points), each resumed on a new connection and engine, asserting loan == 0 from the exchange, no duplicate sends, ledger == exchange leg by leg, no unhedged coin, bounded loss. Mutation-checked: a re-send bug is caught at `sent:A_BUY:1`.
+- Bugs found and fixed by the tests: concurrent legs corrupted one shared DB connection (ledger now serialises per task); interrupted repay was resolved against a fabricated "before" figure (now persisted on the leg); resolve used the caller's quantity instead of the leg's; an unexpected rejection of a status query escaped as a crash (now unresolved/held); a resumed trade could send a fresh entry order from a stale revalidation (now it never does).
+- Notes / limits: interest is billed per started hour in the fake (assumption, verify in Phase 5). One DB connection with a per-task lock is fine here; a pool comes with Phase 7. RECONCILING compares legs and the loan only; balance-level reconciliation, client freeze and kill switches are Phase 4. Alerts go to an in-memory sink until Phase 4. Entitlement gate and rebalance evaluator are hooks (Phases 8d, 9). `buy_on_borrow_side` and `transfer_to_borrow_side` settlement are not implemented (config accepts them; only pre-held inventory runs).
+- Blocked / needs owner: say "phase 3 approved" to begin Phase 4. Numeric limits (#12) still provisional.
+- Next: Phase 4 - reconciliation, freeze logic, kill switches, structured logs, metrics, alerts.
+
+### 2026-10-22 — Phase 2
+- Approval: owner said "continue with the next phase" after Phase 1; treated as "phase 1 approved".
+- Found: Phase 2 code (adapter ABC, errors, models, FakeExchange, SQLite ledger) already sat in the initial commit with no tests and no PROGRESS entry. Reviewed it, kept the exchange side, replaced SQLite with Postgres (D-025).
+- Done: `docker-compose.yml` (Postgres 16); Postgres migration + checksum-verified migrator with advisory lock; `ledger.repository.Ledger` (leg intent persisted before sending, idempotent per trade+leg+attempt, compare-and-set state transitions with log, append-only entries, trade results derived from entries only, per-client filtered reads, rotation audit + last-participation for `plan_rotation`). psycopg dependency; CI Postgres service and coverage gate.
+- Tests: 135 passing (61 new), incl. `tests/test_multi_coin.py`: USDT is the only constant asset, the traded coin is any base (ETH, SOL, DOGE, 1000SHIB, USDC...) with its own step/tick/min-notional, separate per-coin loans, full borrow/sell/repay cycle per coin. FakeExchange 100% branch coverage: full borrow/sell/buy-back/repay cycle, timeout-that-fills and timeout-not-applied (query by client id, duplicate id never executes twice), partial fill, reject, rate limit, exchange down, auth error, stale book, stream drop and resync, latency on fake clock, weighted per-IP/per-client limits with ban and expiry, 300 clients on one book with no leakage. Ledger: append-only triggers block UPDATE/DELETE/TRUNCATE, spec §32/§33 figures, recovered trade keeps losses in net, sum of trade results == client total, cross-client access denied, migration tamper detection, exact decimal round trip. ruff, mypy strict, secret scan clean.
+- Notes: `get_borrowable` returns unrounded Decimals; the engine must floor to step. Fake borrow-pool/collateral model is simplified (single mid price, fixed leverage); real limits come from Phase 5 docs. Not yet built (Phase 3+): connection pool, Redis, balance-drift injection beyond `drift()`, worker-sharding.
+- Blocked / needs owner: say "phase 2 approved" to begin Phase 3. Run `docker compose up -d --wait` before `pytest` locally (DB tests skip otherwise). Nothing committed.
+- Next: Phase 3 — trade state machine and recovery against FakeExchange.
 
 ### 2026-10-22 — Phase 1
 - Done: `pricing/` (types, VWAP walk, executable liquidity within slippage, profit/fees/interest/net ROI, protected limit price, rounding) and `allocation/` (95/5 split, `client_trade_capacity`, 90% `market_cap`, `final_allocation` = min of caps floored to a step valid on both exchanges then re-checked, rotation, single `validate_trade()` covering spec §41). All pure Decimal, no I/O or clock.
@@ -63,9 +82,9 @@ Mark each when its automated test passes.
 | 5 | Preferences | [ ] |
 | 6 | Capital rules (95/5, 90%) | [x] (Phase 1: tests/test_spec_examples.py) |
 | 7 | Scan and net ROI | [ ] |
-| 8 | Qualifying opportunity executes | [ ] |
-| 9 | Both legs succeed → settle | [ ] |
-| 10 | Sell fails after borrowing → recovery, loan = 0 | [ ] |
+| 8 | Qualifying opportunity executes | [x] (Phase 3, FakeExchange: tests/test_engine_happy.py) |
+| 9 | Both legs succeed → settle | [x] (Phase 3, FakeExchange) |
+| 10 | Sell fails after borrowing → recovery, loan = 0 | [x] (Phase 3, FakeExchange: tests/test_engine_recovery.py) |
 | 11 | Rebalance (automatic / manual) | [ ] |
 | 12 | Dashboard + ROI presentation | [ ] |
 | 13 | Pause / resume | [ ] |

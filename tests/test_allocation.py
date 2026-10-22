@@ -292,6 +292,8 @@ def test_valid_trade_passes() -> None:
         ({"recovery_interest_usdt": D(30), "reserve_usdt": D(25)}, Check.RECOVERY_INTEREST_RESERVE),
         ({"recovery_interest_usdt": D(1)}, Check.RECOVERY_INTEREST_RESERVE),  # reserve unknown -> fail safe
         ({"outstanding_loan_after_recovery": D("0.000001")}, Check.LOAN_NOT_ZERO),
+        ({"repay_coin_needed": D("1.0001"), "repay_coin_available": D("1")}, Check.REPAY_COIN),
+        ({"repay_coin_needed": D("1")}, Check.REPAY_COIN),  # availability unknown -> fail safe
     ],
 )
 def test_each_failure_is_reported(over: dict[str, object], expected: Check) -> None:
@@ -300,6 +302,7 @@ def test_each_failure_is_reported(over: dict[str, object], expected: Check) -> N
 
 def test_boundary_values_pass() -> None:
     assert validate_trade(_proposal(expected_net_roi_pct=D("0.3"))).passed
+    assert validate_trade(_proposal(repay_coin_needed=D("1"), repay_coin_available=D("1"))).passed
     assert validate_trade(
         _proposal(recovery_interest_usdt=D(25), reserve_usdt=D(25), outstanding_loan_after_recovery=D(0))
     ).passed
@@ -338,3 +341,13 @@ def test_property_allocation_output_always_passes_validation(capacity: D, market
             )
         )
         assert r.passed, r.failures
+
+
+def test_validate_recovery_shares_the_recovery_terms() -> None:
+    from oddtrue.allocation import RecoveryProposal, validate_recovery
+
+    assert validate_recovery(RecoveryProposal()).passed
+    assert validate_recovery(RecoveryProposal(D(2), D(25), D(0))).passed
+    over = validate_recovery(RecoveryProposal(D(30), D(25), D("0.1")))
+    assert {f.check for f in over.failures} == {Check.RECOVERY_INTEREST_RESERVE, Check.LOAN_NOT_ZERO}
+    assert not validate_recovery(RecoveryProposal(D(1), None, None)).passed  # reserve unknown -> fail safe

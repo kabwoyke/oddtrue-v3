@@ -11,6 +11,24 @@ Each runbook: trigger → immediate actions → verification → follow-up. Keep
   in the ledger as an adjustment with a reason.
 - After any incident: reconcile affected clients, write a short post-mortem, add a regression test.
 
+## Engine alert reference (Phase 3)
+What each alert from `oddtrue.execution.deps.AlertKind` means, what the engine has already done, and the runbook to use.
+In every case the trade stays in its persisted state and the client cannot start another trade (one unfinished trade
+per client); nothing is retried blindly. `advance(client, trade)` safely resumes a parked trade.
+
+| Alert | Engine state | Already done | Next |
+|---|---|---|---|
+| `naked_position` | RECOVERY | Short on B detected; covering with protected buys (escalating) | RB-3 if it escalates |
+| `cover_escalation_exhausted` | RECOVERY (held) | All ladder rungs tried (D-026), no market order sent | RB-3: owner decides, then resume |
+| `loan_not_zero_after_recovery_timeout` | RECOVERY (held) | Past `recovery_timeout_s`, still retrying each pass | RB-2 |
+| `reserve_insufficient` | RECOVERY (held) | Interest/shortfall purchase would exceed the 5% reserve | RB-2: owner tops up reserve (plan `reserve_5`) or funds the coin, then resume |
+| `unknown_outcome_unresolved` | EXECUTING/SETTLING/RECOVERY (held) | Status queries by client id kept failing; nothing re-sent | Check exchange status, then resume; RB-4 if outage |
+| `reconciliation_mismatch` | RECONCILING (held) | Ledger fill differs from the exchange's order record | RB-5: compensating entry, never edit |
+| `exchange_down_in_flight` | current (held) | Calls failed after retries | RB-4 |
+| `auth_incident` | cancelled (pre-trade) or held | Key rejected/revoked | RB-6 |
+| `loan_present_before_trade` | cancelled | A loan for the coin already existed | RB-5 (unexplained borrow) |
+| `dust_left` (not a page) | continues | Coin below the exchange minimum order left on A | none; sweep during rebalancing |
+
 ## RB-1 Global halt / exchange halt / client pause
 - Trigger: runaway behaviour, exchange incident, security concern, owner decision.
 - Actions: set halt (scope GLOBAL / EXCHANGE / CLIENT) → confirm no new trades start → list in-flight trades.

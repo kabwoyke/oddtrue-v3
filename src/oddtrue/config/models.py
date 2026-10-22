@@ -54,12 +54,26 @@ class RiskConfig(_Frozen):
     settlement_method: SettlementMethod
     margin_mode: MarginMode
 
+    # Execution and recovery (Phase 3). All PROVISIONAL until Phases 6-7 (decision #12).
+    max_book_age_s: Decimal = Field(default=Decimal(2), gt=0)  # order book older than this fails pre-check
+    execution_timeout_s: int = Field(default=30, gt=0)  # hard bound for the whole EXECUTING phase
+    unknown_resolve_attempts: int = Field(default=3, ge=1)  # queries before an order is deemed never placed
+    unknown_resolve_backoff_s: Decimal = Field(default=Decimal("0.5"), ge=0)
+    expected_loan_seconds: int = Field(default=60, ge=0)  # loan duration assumed for the interest estimate
+    repay_attempts: int = Field(default=3, ge=1)  # repay passes to absorb interest accrued while repaying
+    recovery_slippage_ladder: tuple[Decimal, ...] = (Decimal("0.002"), Decimal("0.005"), Decimal("0.01"))
+
     @model_validator(mode="after")
     def _split_sums_to_one(self) -> Self:
         if self.client_trade_pct + self.client_reserve_pct != Decimal(1):
             raise ValueError("client_trade_pct + client_reserve_pct must equal 1")
         if self.max_exposure_per_client_usdt > self.max_exposure_global_usdt:
             raise ValueError("per-client exposure cannot exceed global exposure")
+        ladder = self.recovery_slippage_ladder
+        if not ladder or any(not Decimal(0) <= x < Decimal(1) for x in ladder):
+            raise ValueError("recovery_slippage_ladder needs values in [0, 1)")
+        if list(ladder) != sorted(set(ladder)):
+            raise ValueError("recovery_slippage_ladder must be strictly increasing (escalating cover, D-026)")
         return self
 
 

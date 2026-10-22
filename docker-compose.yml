@@ -1,0 +1,17 @@
+# Local dev/test Postgres only. Never used for live mode; credentials here are throwaway.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: oddtrue
+      POSTGRES_PASSWORD: oddtrue_dev
+      POSTGRES_DB: oddtrue
+    ports:
+      - "127.0.0.1:55432:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oddtrue"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
